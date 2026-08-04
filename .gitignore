@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+gadopt_run/
+_frame_*.png
+.ipynb_checkpoints/
+external/
+
+# distribution tarballs kept alongside the working copy
+*.tar.gz
+
+# macOS
+.DS_Store

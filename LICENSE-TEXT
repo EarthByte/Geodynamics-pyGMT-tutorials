@@ -1,0 +1,12 @@
+# Licence for prose, figures and documentation
+
+All markdown cells, figures and documentation in this repository are licensed
+under the Creative Commons Attribution 4.0 International License (CC BY 4.0).
+
+Full text: https://creativecommons.org/licenses/by/4.0/legalcode
+
+Code — everything in geodynkit/, all code cells in the notebooks, and the
+contents of tests/ — is licensed separately under BSD 3-Clause; see LICENSE.
+
+This split follows the precedent set by Barba & Forsyth (2018), CFD Python,
+Journal of Open Source Education 1(9):21, doi:10.21105/jose.00021.

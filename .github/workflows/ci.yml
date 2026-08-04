@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  push: {branches: [main]}
+  pull_request:
+  schedule:
+    - cron: "0 15 * * 0"        # weekly full run, Sunday
+
+jobs:
+  tests:
+    name: Verification tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: conda-incubator/setup-miniconda@v3
+        with:
+          environment-file: environment.yml
+          activate-environment: geodyn-pygmt
+          miniforge-version: latest
+      - name: Fast verification suite
+        shell: bash -el {0}
+        run: pytest tests -v -m "not slow"
+      - name: Slow benchmarks (scheduled runs only)
+        if: github.event_name == 'schedule'
+        shell: bash -el {0}
+        run: pytest tests -v -m "slow"
+
+  notebooks:
+    name: Execute notebooks (runtime budget enforced)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: conda-incubator/setup-miniconda@v3
+        with:
+          environment-file: environment.yml
+          activate-environment: geodyn-pygmt
+          miniforge-version: latest
+      - name: Quick notebooks — must finish in 5 minutes each
+        shell: bash -el {0}
+        env:
+          PYGMT_USE_EXTERNAL_DISPLAY: "false"
+        run: |
+          pytest --nbmake --nbmake-timeout=300 -v \
+            Notebooks/T0[0-5]*.ipynb
+      - name: Blankenbach notebook — 20 minute ceiling
+        if: github.event_name == 'schedule'
+        shell: bash -el {0}
+        env:
+          PYGMT_USE_EXTERNAL_DISPLAY: "false"
+        run: pytest --nbmake --nbmake-timeout=1200 -v Notebooks/T06*.ipynb
+
+  manifest:
+    name: README matches reality
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Notebook manifest check
+        run: python tools/check_manifest.py

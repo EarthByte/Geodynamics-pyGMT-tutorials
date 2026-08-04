@@ -1,0 +1,19 @@
+name: geodyn-pygmt
+channels:
+  - conda-forge
+dependencies:
+  - python>=3.12
+  - numpy>=2.1
+  - scipy>=1.14
+  - xarray>=2024.7
+  - pandas>=2.3
+  - pygmt>=0.19,<0.21     # pulls gmt>=6.5 as a binary dependency
+  - matplotlib            # streamlines + scalar diagnostics; see notebook 00
+  - netcdf4
+  - imageio               # animation frames
+  - imageio-ffmpeg        # MP4 encoding
+  - jupyterlab
+  - ipywidgets
+  - pytest
+  - nbmake                # notebook CI with per-notebook runtime budgets
+  - nbstripout

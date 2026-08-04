@@ -1,0 +1,148 @@
+name: Publish container image
+
+# Builds and publishes ghcr.io/earthbyte/geodyn-pygmt.
+#
+# Building in CI rather than on a laptop is deliberate. The image is the thing
+# students and BinderHub pull, so it must be reproducible and must not pick up
+# anything from a developer's machine — a corporate proxy's CA certificate, a
+# stale pip cache, a local ~/.netrc. A clean runner has none of that.
+#
+# Two native jobs (amd64 and arm64) rather than one job with QEMU: the base
+# image firedrakeproject/firedrake-vanilla-default is genuinely multi-arch, so
+# Apple Silicon users get a native image, and emulated arm64 builds of PETSc-
+# adjacent stacks are painfully slow.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Image tag to publish (e.g. 0.1.0)"
+        required: true
+        default: "0.1.0"
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: earthbyte/geodyn-pygmt
+
+jobs:
+  build:
+    name: Build ${{ matrix.platform }}
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-24.04
+            suffix: amd64
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+            suffix: arm64
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to ghcr.io
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push by digest
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: ${{ matrix.platform }}
+          outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=true
+          cache-from: type=gha,scope=${{ matrix.suffix }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.suffix }}
+          provenance: true
+          sbom: true
+
+      - name: Export digest
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          mkdir -p /tmp/digests
+          touch "/tmp/digests/${DIGEST#sha256:}"     # strip the algorithm prefix in shell,
+                                                     # not in a GitHub expression
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: digest-${{ matrix.suffix }}
+          path: /tmp/digests/*
+          retention-days: 1
+
+  merge:
+    name: Publish multi-arch manifest
+    runs-on: ubuntu-24.04
+    needs: build
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: /tmp/digests
+          pattern: digest-*
+          merge-multiple: true
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to ghcr.io
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resolve tag
+        id: tag
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "value=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "value=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create and push manifest
+        working-directory: /tmp/digests
+        run: |
+          docker buildx imagetools create \
+            -t ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.tag.outputs.value }} \
+            -t ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest \
+            $(printf '${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@sha256:%s ' *)
+
+      - name: Smoke test the published image
+        run: |
+          docker run --rm ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.tag.outputs.value }} \
+            python3 -c "
+          import pygmt, firedrake, gadopt, numpy, xarray
+          import subprocess
+          gmt = subprocess.run(['gmt','--version'], capture_output=True, text=True).stdout.strip()
+          print('pygmt', pygmt.__version__, '| GMT', gmt)
+          assert tuple(int(p) for p in gmt.split('.')[:2]) >= (6, 5), 'GMT too old for pyGMT 0.19'
+          print('OK: Firedrake + G-ADOPT + pyGMT coexist')
+          "
+
+      - name: Verify no stray CA certificates were baked in
+        run: |
+          # A developer behind a TLS-intercepting proxy can accidentally bake
+          # their CA bundle into the image and make every student trust it.
+          # Building in CI should make this impossible; assert it anyway.
+          out=$(docker run --rm ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.tag.outputs.value }} \
+                  env | grep -iE 'REQUESTS_CA_BUNDLE|SSL_CERT_FILE|PIP_CERT' || true)
+          if [ -n "$out" ]; then
+            echo "::error::image overrides the TLS trust store: $out"
+            exit 1
+          fi
+          echo "trust store is clean"

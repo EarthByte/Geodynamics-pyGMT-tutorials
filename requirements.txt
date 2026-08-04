@@ -1,0 +1,16 @@
+# pip mirror of environment.yml, for Binder and Colab.
+# NOTE: pygmt here does NOT install the GMT C library. On Colab either use
+# condacolab, or apt-install gmt (needs Ubuntu >= 24.04 for GMT >= 6.5).
+numpy>=2.1
+scipy>=1.14
+xarray>=2024.7
+pandas>=2.3
+pygmt>=0.19,<0.21
+matplotlib
+netcdf4
+imageio
+imageio-ffmpeg
+jupyterlab
+ipywidgets
+pytest
+nbmake

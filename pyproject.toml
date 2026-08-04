@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "geodynkit"
+version = "0.1.0.dev0"
+description = "Readable 2-D geodynamic solvers and pyGMT plotting helpers for teaching"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "BSD-3-Clause"
+dependencies = ["numpy>=1.26", "scipy>=1.11", "xarray>=2024.7"]
+
+[project.optional-dependencies]
+plot = ["pygmt>=0.19,<0.21", "matplotlib"]
+
+[tool.setuptools.packages.find]
+include = ["geodynkit*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+filterwarnings = ["ignore::DeprecationWarning"]
