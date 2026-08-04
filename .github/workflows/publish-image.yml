@@ -134,6 +134,16 @@ jobs:
           print('OK: Firedrake + G-ADOPT + pyGMT coexist')
           "
 
+      - name: Verify the image can actually start on a BinderHub
+        run: |
+          # The hub exec's `jupyterhub-singleuser`. If it is missing, the image
+          # passes every other check here, publishes cleanly, pulls fine, and
+          # then dies on Binder with a message that names the executable but not
+          # the missing package. Assert it exists, and that the notebook user is
+          # UID 1000 as BinderHub requires.
+          docker run --rm ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.tag.outputs.value }} \
+            bash -lc 'command -v jupyterhub-singleuser && command -v jupyter && test "$(id -u)" = "1000" && echo "binder-ready as $(id -un) uid $(id -u)"'
+
       - name: Verify no stray CA certificates were baked in
         run: |
           # A developer behind a TLS-intercepting proxy can accidentally bake

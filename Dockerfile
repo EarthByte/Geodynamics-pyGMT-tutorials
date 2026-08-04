@@ -23,9 +23,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
  && ln -sf "$lib" "$(dirname "$lib")/libgmt.so" \
  && test -e "$(dirname "$lib")/libgmt.so"
 
+# jupyterhub is NOT optional for a BinderHub image: it provides the
+# `jupyterhub-singleuser` executable that the hub exec's to start the server.
+# Without it the image builds, pushes and runs perfectly by hand, and then
+# fails on Binder with
+#   exec: "jupyterhub-singleuser": executable file not found in $PATH
+# which says nothing about the actual omission.
 RUN pip install --no-cache-dir \
         gadopt pygmt xarray netCDF4 imageio imageio-ffmpeg \
-        jupyterlab notebook nbgitpuller
+        jupyterhub jupyterlab notebook nbgitpuller
 
 # BinderHub requires a UID-1000 user that owns $HOME, and forbids running as root.
 ARG NB_USER=jovyan
@@ -33,7 +39,8 @@ ARG NB_UID=1000
 # Ubuntu 24.04 base images already ship a UID-1000 'ubuntu' user; remove it first.
 RUN if id -u ${NB_UID} >/dev/null 2>&1; then userdel -r "$(id -un ${NB_UID})" || true; fi \
  && useradd -m -s /bin/bash -u ${NB_UID} ${NB_USER}
-ENV HOME=/home/${NB_USER} \
+ENV NB_USER=${NB_USER} \
+    HOME=/home/${NB_USER} \
     PYGMT_USE_EXTERNAL_DISPLAY=false
 WORKDIR ${HOME}
 USER ${NB_USER}

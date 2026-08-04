@@ -28,6 +28,7 @@ from . import advection  # noqa: F401
 from . import stokes  # noqa: F401
 from . import markers  # noqa: F401
 from . import convection  # noqa: F401
+from . import lithosphere  # noqa: F401
 
 __all__ = [
     "plotting",
@@ -36,4 +37,5 @@ __all__ = [
     "stokes",
     "markers",
     "convection",
+    "lithosphere",
 ]

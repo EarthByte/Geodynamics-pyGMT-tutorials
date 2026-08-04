@@ -86,9 +86,15 @@ def main():
 
             print(f"executing {src.stem} ...", flush=True)
             t0 = time.time()
+            # Execute with the NOTEBOOK'S directory as cwd, not the repo root.
+            # That is what nbmake does in CI and what a student gets when they
+            # open Notebooks/T01 in JupyterLab, so every notebook's
+            # `sys.path.insert(0, "..")` and every relative data path means the
+            # same thing everywhere. Building from the repo root instead let
+            # those paths be wrong-but-harmless here and broken elsewhere.
             client = NotebookClient(nb, timeout=args.timeout,
                                     kernel_name="python3",
-                                    resources={"metadata": {"path": str(ROOT)}})
+                                    resources={"metadata": {"path": str(OUT)}})
             try:
                 client.execute()
             except Exception as exc:                      # noqa: BLE001

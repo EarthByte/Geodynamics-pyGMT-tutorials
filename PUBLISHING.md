@@ -1,4 +1,9 @@
-# Publishing to EarthByte — what to do tomorrow
+# Publishing to EarthByte
+
+> **Status: DONE, 4 August 2026.** Repo public, CI green, image published and
+> public at `ghcr.io/earthbyte/geodyn-pygmt:0.1.0` (linux/amd64 + linux/arm64).
+> Kept as a record of what the steps actually were — most of it is reusable for
+> the next package EarthByte publishes, and step 4 in particular cost an hour.
 
 Everything below has been verified from this session except where marked
 **needs your access**. I could not do any of it myself: this sandbox's GitHub
@@ -86,7 +91,7 @@ access permissions *only if the link exists before the first publish*. Link it
 afterwards and it keeps whatever permissions it already had. It is not worth
 getting wrong for the sake of a rename.
 
-## Step 4 — Make the package public — **needs your access**
+## Step 4 — Make the package public — ⚠️ THE HARD ONE
 
 **This is the step most likely to bite you.** A newly published package is
 **private by default**, including one published by Actions into an org. A private
@@ -97,6 +102,39 @@ Go to the package page → **Package settings** (right-hand side) → **Danger Z
 
 > One-way door: once a package is public it cannot be made private again. That is
 > fine here — the suite is BSD-3 / CC-BY — but be deliberate about it.
+
+### What actually happened, and what to do about it
+
+The visibility control was **greyed out**, with *"Setting is disabled by
+organization administrators"* — shown to an account that IS an organization
+administrator. The message is misleading: it is not about your role, it is an
+org-wide **policy** that forbids public packages, and it overrides the
+per-package control for everyone including owners.
+
+Fix it one level up, in a completely different part of the settings:
+
+**Organisation settings → Packages → Package creation → enable Public**
+(https://github.com/organizations/EarthByte/settings/packages)
+
+Then return to the package settings and the control is live.
+
+Note this is an **org-wide** change: it permits public packages across all of
+EarthByte, not just this one. Reasonable here, but it is a policy decision.
+
+Also beware there are **three** different Danger Zones and only one is the right
+one. They are easy to conflate and the consequences differ enormously:
+
+| Page | URL contains | Danger Zone offers |
+|---|---|---|
+| Organisation | `/organizations/EarthByte/settings` | delete the organisation |
+| Repository | `/<org>/<repo>/settings` | change **repo** visibility |
+| **Package** | `/packages/container/<name>/settings` | change **package** visibility |
+
+There is **no REST API and no `gh` command** for package visibility — GitHub
+exposes it only through the web UI, so this step cannot be scripted.
+
+This is also why EarthByte had no public ghcr packages before this one. It was
+not that nobody had tried; the org was configured to prevent it.
 
 Verify from any machine with no credentials at all:
 

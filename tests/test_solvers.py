@@ -236,3 +236,50 @@ def test_blankenbach_richardson_extrapolation():
         f"extrapolated v_rms {extrapolated:.3f} vs published "
         f"{BLANKENBACH_1A['v_rms']:.3f} ({rel:.1%} off)"
     )
+
+
+# ------------------------------------------------------- lithosphere setup
+def test_geotherm_reaches_the_prescribed_basal_temperature():
+    """Independent check on the Naliboff & Buiter (2015) thermal parameters.
+
+    The surface heat flow, layer conductivities and radiogenic heat production
+    are specified separately from the basal temperature boundary condition. If
+    they are mutually consistent, integrating the conductive geotherm from the
+    surface must land on that basal value. It does: 1613 K at 100 km.
+    """
+    from geodynkit.lithosphere import geotherm
+    assert abs(float(np.atleast_1d(geotherm(100.0))[0]) - 1613.0) < 1.0
+
+
+def test_strength_envelope_has_three_layer_structure():
+    """A continental strength envelope must show brittle tops and ductile bases.
+
+    Getting this wrong is the classic way to build a lithosphere model that
+    runs happily and deforms nothing like real rock.
+    """
+    from geodynkit.lithosphere import strength_envelope
+    e = strength_envelope(strain_rate=1e-15)
+    d, brittle_governs = e["depth_km"], e["brittle_MPa"] < e["ductile_MPa"]
+
+    assert brittle_governs[d < 5].all()            # near-surface is brittle
+    transitions = np.where(np.diff(brittle_governs.astype(int)) != 0)[0]
+    assert len(transitions) >= 3, "expected crustal and mantle BDTs"
+    assert 5 < d[transitions[0]] < 20              # upper-crustal BDT
+    assert e["strength_MPa"].max() > 100           # a real strength peak
+
+
+def test_dislocation_creep_is_non_newtonian():
+    """n ~ 4 means an order of magnitude in strain rate is ~3/4 in viscosity."""
+    from geodynkit.lithosphere import UPPER_CRUST, dislocation_creep_viscosity
+    e1 = dislocation_creep_viscosity(UPPER_CRUST, 700.0, 1e-15)
+    e2 = dislocation_creep_viscosity(UPPER_CRUST, 700.0, 1e-14)
+    assert e2 < e1
+    n = UPPER_CRUST.stress_exponent
+    assert np.isclose(e1 / e2, 10.0 ** ((n - 1) / n), rtol=1e-6)
+
+
+def test_strain_weakening_is_bounded_and_monotone():
+    from geodynkit.lithosphere import strain_weakening_factor as w
+    assert w(0.0) == 1.0 and w(0.4) == 1.0          # below the onset
+    assert np.isclose(w(2.0), 0.25)                 # fully weakened
+    assert w(0.5) > w(1.0) > w(1.5) - 1e-12         # monotone through it
