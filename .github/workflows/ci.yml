@@ -17,6 +17,13 @@ jobs:
           environment-file: environment.yml
           activate-environment: geodyn-pygmt
           miniforge-version: latest
+      - name: Install geodynkit
+        # Without this, a bare `pytest` cannot import geodynkit: pytest does not
+        # put the repo root on sys.path, so collection dies before any test
+        # runs. --no-deps because conda already resolved the dependency tree.
+        shell: bash -el {0}
+        run: pip install -e . --no-deps
+
       - name: Fast verification suite
         shell: bash -el {0}
         run: pytest tests -v -m "not slow"
@@ -35,6 +42,13 @@ jobs:
           environment-file: environment.yml
           activate-environment: geodyn-pygmt
           miniforge-version: latest
+      - name: Install geodynkit
+        # Without this, a bare `pytest` cannot import geodynkit: pytest does not
+        # put the repo root on sys.path, so collection dies before any test
+        # runs. --no-deps because conda already resolved the dependency tree.
+        shell: bash -el {0}
+        run: pip install -e . --no-deps
+
       - name: Quick notebooks — must finish in 5 minutes each
         shell: bash -el {0}
         env:

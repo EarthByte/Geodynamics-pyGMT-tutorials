@@ -2,7 +2,8 @@ name: geodyn-pygmt
 channels:
   - conda-forge
 dependencies:
-  - python>=3.12
+  - python>=3.12,<3.15   # upper bound so a student in 18 months gets
+                         # the interpreter the notebooks were tested on
   - numpy>=2.1
   - scipy>=1.14
   - xarray>=2024.7
