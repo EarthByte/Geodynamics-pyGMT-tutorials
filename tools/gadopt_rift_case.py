@@ -52,7 +52,8 @@ SR = U0 / H                     # strain-rate scale, 1/s
 T_SCALE = H / U0                # time scale, s
 
 
-def build(nx, ny, aspect=2.0):
+def build(nx, ny, aspect=2.0, damper=1e21, seed_halfwidth_km=25.0,
+          heat_flow=0.055):
     """Assemble mesh, fields, rheology and solvers. Returns a dict of handles."""
     mesh = RectangleMesh(nx, ny, aspect, 1.0, quadrilateral=True)
     mesh.cartesian = True
@@ -106,7 +107,7 @@ def build(nx, ny, aspect=2.0):
     # step; keeping T frozen isolates the mechanics so the level-set and
     # strain-weakening machinery can be verified on its own.
     zc = np.linspace(0.0, H / 1e3, 400)
-    Tc = np.atleast_1d(LI.geotherm(zc))
+    Tc = np.atleast_1d(LI.geotherm(zc, surface_heat_flow=heat_flow))
     Tfield = Function(Q, name="Temperature")
     Tfield.interpolate(Constant(0.0))
     Tfield.dat.data[:] = np.interp(
@@ -120,7 +121,12 @@ def build(nx, ny, aspect=2.0):
     xc = Function(Q).interpolate(X[0]).dat.data_ro
     yc = Function(Q).interpolate(X[1]).dat.data_ro
     rng = np.random.default_rng(0)
-    seed = ((np.abs(xc - aspect / 2) < 0.25) & (yc > y_lc))
+    # Seed width matters. 25 km half-width on a 200 km domain is not a seed,
+    # it is a weak province occupying a quarter of the model — and a province
+    # cannot localise, because there is no gradient for strain to concentrate
+    # into. A real seed is a few km across.
+    sw = seed_halfwidth_km * 1e3 / H
+    seed = ((np.abs(xc - aspect / 2) < sw) & (yc > y_lc))
     strain.dat.data[seed] = rng.uniform(0.5, 1.5, seed.sum())
 
     # ---- rheology ------------------------------------------------------
@@ -157,10 +163,23 @@ def build(nx, ny, aspect=2.0):
                               interface="geometric")
         phi = fric * pi / 180.0 * w
         sigma_y = coh * w / STRESS * cos(phi) + (plith + pp) * sin(phi)
-        mu_p = sigma_y / (2 * epsii)
+        # PLASTIC DAMPER, after Duretz et al. (2020) and used in ASPECT's
+        # continental_extension cookbook ("Plastic damper viscosity = 1e21").
+        # Without it the plastic branch can drive the viscosity arbitrarily low
+        # wherever the strain rate is large; the linearised Picard problem then
+        # has near-zero-viscosity regions where the velocity is essentially
+        # unconstrained, and the iteration converges happily to |u| ~ 1e4 times
+        # the boundary velocity. Adding a damper in series puts a floor under
+        # the plastic viscosity that scales with the physics rather than being
+        # an arbitrary clip.
+        mu_damp = damper / MU0
+        mu_p = sigma_y / (2 * epsii) + mu_damp
+
         # switch = 0 disables the plastic branch entirely
         mu_eff = conditional(switch > 0.5, min_value(mu_c, mu_p), mu_c)
-        return (max_value(min_value(mu_eff, 1e26 / MU0), 1e18 / MU0),
+        # Viscosity contrast capped at 1e6. The cookbook's 1e18-1e26 range is
+        # 1e8, which is solvable in ASPECT's SI formulation but not here.
+        return (max_value(min_value(mu_eff, 1e26 / MU0), 1e20 / MU0),
                 mu_c, mu_p, epsii)
 
     mu, mu_creep, mu_plast, epsii = rheology(u_, p_)
@@ -180,8 +199,17 @@ def build(nx, ny, aspect=2.0):
     mu_pic = rheology(u_pic, p_pic)[0]
     picard = StokesSolver(z, BoussinesqApproximation(0, mu=mu_pic), bcs=bcs)
 
+    # Reinitialisation pseudo-timestep MUST scale with the interface thickness.
+    # G-ADOPT's default is a fixed 0.02, while `interface_thickness` returns
+    # ~0.35 * h_min — so the default is stable on a coarse mesh and unstable on
+    # a fine one. At 32x16 epsilon ~ 0.022 and it works; at 96x48 epsilon ~
+    # 0.0073 and reinitialisation returns DIVERGED_FUNCTION_NANORINF. Tying the
+    # step to epsilon makes the model resolution-independent, which is the
+    # difference between a demo and something you can refine.
+    eps_min = float(epsilon.dat.data_ro.min())
+    reini = {"epsilon": epsilon, "timestep": 0.5 * eps_min, "steps": 2}
     ls_solver = [LevelSetSolver(psi, adv_kwargs={"u": u_fn, "timestep": dt},
-                                reini_kwargs={"epsilon": epsilon})
+                                reini_kwargs=reini)
                  for psi in ls]
 
     # Plastic strain: advected, with a source equal to the plastic strain rate
@@ -198,6 +226,7 @@ def build(nx, ny, aspect=2.0):
                 ls_solver=ls_solver, strain=strain, strain_solver=strain_solver,
                 mu=mu, epsii=epsii, Q=Q, K=K, w=w, aspect=aspect, rho=rho,
                 mu_creep=mu_creep, mu_plast=mu_plast, X=X, H=H,
+                h_min=aspect / nx,
                 picard=picard, z_pic=z_pic, switch=switch)
 
 
@@ -225,30 +254,112 @@ def check_layering(m):
     return out
 
 
-def solve_stokes(m, picard_iters, tol=1e-4, cold=False):
+class PicardDiverged(RuntimeError):
+    """Raised when the Picard iteration is going backwards.
+
+    This exists because the alternative is worse. Picard can diverge silently:
+    it returns a velocity field, the code carries on, and the first sign of
+    trouble is the level-set advection exploding several steps later with an
+    error that points at the wrong component entirely. Ask me how I know.
+    """
+
+
+def solve_stokes(m, picard_iters, tol=1e-4, cold=False, u_sane=1e3):
     """Robust visco-plastic Stokes solve: isoviscous -> Picard -> Newton.
 
-    Returns (picard_iterations_used, newton_converged).
+    Returns (picard_iterations_used, newton_converged, residual_history).
     """
     if cold:
         m["switch"].assign(0.0)          # linear viscosity; breaks the 1/epsii
         m["picard"].solve()              # singularity at u = 0
         m["switch"].assign(1.0)
 
-    used = 0
-    for _ in range(picard_iters):
+    # Damped (under-relaxed) Picard. Undamped, this diverges above ~48x24:
+    # each iteration overshoots, the viscosity evaluated at the overshoot is
+    # worse, and the next overshoot is bigger. Taking only a fraction `omega`
+    # of each update tames that, at the cost of more iterations.
+    #
+    # `omega` adapts: halve it whenever the update grows, and creep back up
+    # while it shrinks. Fixed damping either converges slowly everywhere or not
+    # at all where the rheology is stiffest.
+    # Picard on this system OSCILLATES rather than converging monotonically:
+    # the residual falls, rises, and falls again. An earlier version of this
+    # code ran a fixed 40 iterations and reported success purely because it
+    # happened to stop on a downswing — the same run stopped at iteration 19
+    # would have looked like divergence.
+    #
+    # So: keep the BEST iterate seen, restore it at the end, and only call it
+    # divergence if a long window passes with no improvement. This is the
+    # standard safeguard for a non-monotone fixed-point iteration, and it makes
+    # the outcome independent of where you happen to stop.
+    used, hist = 0, []
+    omega = m.get("omega0", 0.5)
+    Zs = m["z"].function_space()
+    z_prev, z_raw = Function(Zs), Function(Zs)
+    z_best = Function(Zs)
+    best_du, best_at = float("inf"), -1
+
+    for i in range(picard_iters):
+        z_prev.assign(m["z"])
         m["z_pic"].assign(m["z"])
         m["picard"].solve()
+        z_raw.assign(m["z"])            # raw fixed-point image, kept separate
+
+        # Measure the UNDAMPED update. This is the residual of the fixed-point
+        # map and is independent of omega — essential, because omega changes
+        # between iterations, so a damped step norm is not comparable with the
+        # previous one and would corrupt both the convergence test and the
+        # adaptation below.
+        # RELATIVE residual. An absolute one is meaningless when the solution
+        # magnitude is itself in question: at |u| ~ 5e4 an absolute update of
+        # 1e-3 reads as converged to eight digits, while the answer is wrong by
+        # four orders of magnitude.
+        unorm = max(float(norm(split(z_raw)[0])), 1e-12)
+        du = float(norm(split(z_raw)[0] - split(z_prev)[0])) / unorm
+        hist.append(du)
         used += 1
-        du = norm(split(m["z"])[0] - split(m["z_pic"])[0])
+
+        if du < best_du:
+            best_du, best_at = du, i
+            z_best.assign(z_raw)
+
+        # Relax through an explicit temporary. Writing
+        #   z.assign(z_prev + omega*(z - z_prev))
+        # puts z on both sides of its own assignment, which aliases.
+        m["z"].assign(z_prev + omega * (z_raw - z_prev))
+
         if du < tol:
             break
 
+        if len(hist) > 1:
+            if hist[-1] > hist[-2]:
+                omega = max(0.05, 0.5 * omega)      # back off
+            elif hist[-1] < 0.5 * hist[-2]:
+                omega = min(1.0, 1.3 * omega)       # converging well, push on
+
+        # Genuine stagnation: a long window with no new best. Not merely "the
+        # residual went up", which happens routinely here.
+        if i - best_at > 25:
+            break
+
+    # Restore the best iterate found, not whichever one we stopped on.
+    m["z"].assign(z_best)
+    hist.append(best_du)
+
+    # The boundary velocity is 1 by construction, so a converged solution is
+    # O(1-10). Anything vastly larger is not a solution, whatever the solver
+    # reported.
+    umax = float(np.abs(m["u"].dat.data_ro).max())
+    if not np.isfinite(umax) or umax > u_sane:
+        raise PicardDiverged(
+            f"|u|max = {umax:.3e}, but the boundary velocity is 1 — "
+            "the Stokes solution is not physical")
+
     try:
         m["stokes"].solve()              # Newton polish, now close enough
-        return used, True
+        return used, True, hist
     except ConvergenceError:
-        return used, False               # Picard result stands; keep going
+        return used, False, hist         # Picard result stands; keep going
 
 
 def run(m, steps):
@@ -256,8 +367,16 @@ def run(m, steps):
     hist = []
     t0 = time.perf_counter()
     for n in range(steps):
-        pic, newton_ok = solve_stokes(m, picard_iters=40 if n == 0 else 8,
-                                      cold=(n == 0))
+        pic, newton_ok, res = solve_stokes(m, picard_iters=120 if n == 0 else 30,
+                                           cold=(n == 0))
+
+        # CFL-limit the timestep from the ACTUAL velocity, not a guess. A fixed
+        # timestep is a resolution-dependent bug waiting to happen: halve the
+        # mesh and the Courant number doubles.
+        umax = max(float(np.abs(m["u"].dat.data_ro).max()), 1e-12)
+        dt_cfl = 0.4 * m["h_min"] / umax
+        m["dt"].assign(min(2e-3, dt_cfl))
+
         for s in m["ls_solver"]:
             s.solve()
         m["strain_solver"].solve()
@@ -267,8 +386,9 @@ def run(m, steps):
                          strain_max=float(sd.max()),
                          strain_mean=float(sd.mean()),
                          weak_fraction=float((sd > 1.5).mean())))
-        print(f"  step {n:3d}  picard {pic:3d}  newton {'ok' if newton_ok else 'FAILED'}"
-              f"  strain max {sd.max():.3f} mean {sd.mean():.4f}", flush=True)
+        print(f"  step {n:3d}  picard {pic:3d} (res {res[-1]:.2e})  "
+              f"newton {'ok' if newton_ok else 'FAILED'}  |u|max {umax:.2f}  "
+              f"dt {float(m['dt']):.2e}  strain max {sd.max():.3f}", flush=True)
     return hist, time.perf_counter() - t0
 
 
@@ -278,9 +398,17 @@ if __name__ == "__main__":
     ap.add_argument("--ny", type=int, default=48)
     ap.add_argument("--steps", type=int, default=10)
     ap.add_argument("--out", default="/tmp/rift.npz")
+    ap.add_argument("--heatflow", type=float, default=0.055,
+                    help="surface heat flow W/m2; low = cold, strong, coupled crust")
+    ap.add_argument("--seed-km", type=float, default=25.0,
+                    help="seed half-width in km")
+    ap.add_argument("--damper", type=float, default=1e21,
+                    help="plastic damper viscosity, Pa s (cookbook: 1e21)")
     args = ap.parse_args()
 
-    m = build(args.nx, args.ny)
+    m = build(args.nx, args.ny, damper=args.damper,
+              seed_halfwidth_km=args.seed_km,
+              heat_flow=args.heatflow)
 
     layering = check_layering(m)
     for k, v in layering.items():
@@ -296,15 +424,59 @@ if __name__ == "__main__":
     ls_range = [(float(p.dat.data_ro.min()), float(p.dat.data_ro.max()))
                 for p in m["ls"]]
 
-    Q = m["Q"]
+    # Sample onto a REGULAR grid. Saving raw dof arrays is useless for
+    # plotting: CG2 dofs sit at vertices, edge midpoints and cell interiors in
+    # an ordering that is not a reshape of the mesh, so there is no way to
+    # recover a picture from them afterwards.
+    Q, aspect = m["Q"], m["aspect"]
+    nxs, nys = 4 * args.nx + 1, 4 * args.ny + 1
+    xs = np.linspace(0.0, aspect, nxs)
+    ys = np.linspace(0.0, 1.0, nys)
+    Xg, Yg = np.meshgrid(xs, ys)
+    pts = np.column_stack([Xg.ravel(), Yg.ravel()])
+
+    # Export through CG1, not CG2. Viscosity and strain rate have near-
+    # discontinuous transitions where the plastic branch takes over, and a
+    # quadratic basis OVERSHOOTS at those jumps: interpolating into CG2 gave
+    # 487 points of NEGATIVE viscosity (down to -4e24) and 313 of negative
+    # strain rate, from a UFL expression bounded below at 1e20 and by a square
+    # root respectively. The model was fine; the diagnostic was lying.
+    # CG1 cannot overshoot a monotone jump, and positive fields are clipped as
+    # a second line of defence.
+    P1 = FunctionSpace(m["mesh"], "CG", 1)
+
+    def grid(expr, positive=False):
+        f = Function(P1).interpolate(expr)
+        g = np.array(f.at(pts, tolerance=1e-8)).reshape(nys, nxs)[::-1]
+        return np.maximum(g, 0.0) if positive else g
+
     out = dict(
-        strain=Function(Q).interpolate(m["strain"]).dat.data_ro.copy(),
-        viscosity=Function(Q).interpolate(m["mu"]).dat.data_ro.copy(),
-        strain_rate=Function(Q).interpolate(m["epsii"]).dat.data_ro.copy(),
+        x_km=xs * H / 1e3,
+        depth_km=(1.0 - ys[::-1]) * H / 1e3,
+        strain=grid(m["strain"], positive=True),
+        viscosity=grid(m["mu"], positive=True) * MU0,
+        strain_rate=grid(m["epsii"], positive=True) * SR,
+        density=grid(m["rho"], positive=True),
+        weakening=grid(m["w"], positive=True),
     )
+    uu = np.array(m["u"].at(pts, tolerance=1e-8)).reshape(nys, nxs, 2)[::-1]
+    out["vx"], out["vz"] = uu[..., 0], -uu[..., 1]
     np.savez(args.out, **out)
 
+    # Localisation metric. A rift concentrates strain at the seed and unloads
+    # its surroundings; diffuse thinning raises both equally. The ratio is the
+    # number to watch, not the absolute strain.
+    xk, zk, st = out["x_km"], out["depth_km"], out["strain"]
+    inseed = np.abs(xk[None, :] - 100.0) < 25.0
+    crust = (zk[:, None] > 5.0) & (zk[:, None] < 40.0)
+    s_in = float(st[np.broadcast_to(inseed, st.shape) & np.broadcast_to(crust, st.shape)].mean())
+    s_out = float(st[(~np.broadcast_to(inseed, st.shape)) & np.broadcast_to(crust, st.shape)].mean())
+
     print("RESULT " + json.dumps(dict(
+        damper=args.damper, seed_km=args.seed_km, heat_flow=args.heatflow,
+        strain_in_seed=round(s_in, 4),
+        strain_outside=round(s_out, 4),
+        localisation=round(s_in / max(s_out, 1e-9), 3),
         steps=args.steps, nx=args.nx, ny=args.ny, seconds=round(secs, 2),
         level_set_range=ls_range,
         strain_max_initial=round(hist[0]["strain_max"], 3),
