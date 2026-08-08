@@ -56,17 +56,21 @@ Docker image or on a BinderHub.
 | 07 | G-ADOPT: finite elements, and the same plots | **2 min 41 s (measured)** |
 | 08 | Parallelism, measured rather than assumed | **95 s (measured)** |
 
-Planned, not yet built:
-
-* **T09** — visco-plastic rheology and strain localisation
-* **T10** — the 2-D cylindrical annulus (see the note below)
-* **T11** — driving the annulus with pyGPlates surface velocities
-
 ### Part 3 — lithospheric deformation
 
 The mantle-scale ladder above is only half the picture. Lithospheric extension
 and shortening exercise a different part of the physics: visco-plastic strain
 localisation, a free surface, and large finite strain.
+
+| # | Notebook | Runtime |
+|---|---|---|
+| 09 | Visco-plasticity and shear bands: what localises, and what only looks like it | **about 3 min (measured)** |
+
+Planned, not yet built:
+
+* **T10** — the same benchmark made time-dependent: material advection, accumulated plastic strain, strain weakening — a rift
+* **T11** — rifting modes: narrow vs wide, set by crustal strength and geotherm
+* **T12** — orogenic wedges: critical taper and thrust sequences
 
 **This turns out to be far cheaper than expected.** G-ADOPT already ships a
 kinematically-driven, visco-plastic lithospheric model — it is simply not
@@ -87,21 +91,20 @@ with those two signs flipped.** The rheology is user-supplied UFL rather than
 library-internal, so any lithospheric rheology - temperature-dependent creep,
 strain softening, layered crust - is writable in the notebook itself.
 
-| # | Notebook | Basis | Status |
-|---|---|---|---|
-| 12 | Pure and simple shear: the kinematic frame for everything that follows | `geodynkit` markers | planned |
-| 13 | **Lithospheric shortening**: shear-band localisation, after Spiegelman et al. (2016) | wrap G-ADOPT `Drucker_Prager` | planned |
-| 14 | **Lithospheric extension**: necking and boudinage - the same model, signs reversed | as T13 | planned |
-| 15 | **Rifting modes**: narrow vs wide vs core complex, set by crustal strength | + layered rheology, free surface | planned |
-| 16 | **Orogenic wedges**: critical taper and thrust sequences | + surface processes | planned |
+**Built, in T09.** `tools/gadopt_lithosphere_case.py` runs both modes from one
+script — the sign of the boundary velocity is the only difference. At 128x64,
+shortening converges in 18 Picard iterations (~8 s) and extension in 34 (~16 s),
+both then polished by Newton in ~2 s. Conjugate shear bands form from the seed
+notch in both, and extension is the harder problem in every sense: twice the
+Picard iterations, and a stronger, narrower band.
 
-**Prototyped and working.** `tools/gadopt_lithosphere_case.py` runs both modes
-from one script — the sign of the boundary velocity is the only difference. At
-96x48 on two slow cores, shortening converges in 18 Picard iterations (5.8 s)
-and extension in 34 (10.3 s), both then polished by Newton in ~1 s. Conjugate
-shear bands form from the seed notch in both. Extension localises *more*
-strongly (peak/median strain rate 9.1 vs 6.9), which is what you expect: necking
-is self-amplifying, thickening is not.
+The notebook's real subject is which diagnostics survive mesh refinement, because
+in a localisation problem most of them do not. Across nx = 64 to 256 the peak
+strain rate wanders non-monotonically (2.93, 3.62, 6.12, 4.93 in shortening)
+while the median is stable to three digits and the band dip converges to 41.8°
+and 45.1°. The dip is checkable against theory: with dilatancy angle zero the
+kinematic (Roscoe) prediction is 45°, the stress-based Coulomb prediction is 30°,
+and the model picks Roscoe.
 
 The Spiegelman case is **instantaneous** — one nonlinear solve, no advection, no
 evolving topography, no temperature, no strain weakening. A research-grade rift
@@ -126,7 +129,12 @@ archived UWGeodynamics rifting tutorials for **model design**; not for code.
 Following the GemPy tutorials' "units of three" grammar, each rung adds exactly
 one structural complication rather than several at once.
 
-> **Note on the planned T10.** The annulus at G-ADOPT's default settings
+### Part 4 — mantle scale, planned
+
+* **T13** — the 2-D cylindrical annulus (see the note below)
+* **T14** — driving the annulus with pyGPlates surface velocities
+
+> **Note on the planned T13.** The annulus at G-ADOPT's default settings
 > (128×32, Ra = 1e5, steady-state tolerance 1e-7) exceeded 50 minutes serial on a
 > 2-core cloud container and projects to roughly 100 minutes. On a modern laptop
 > that is ~30 min serial, and comfortably less under MPI. The notebook relaxes the

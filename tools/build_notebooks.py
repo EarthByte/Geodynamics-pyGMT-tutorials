@@ -9,7 +9,7 @@ that can execute the notebooks as ordinary code. The ``.ipynb`` files in
 that every figure renders on GitHub without anyone installing a thing.
 
     python tools/build_notebooks.py            # build + execute all
-    python tools/build_notebooks.py 00 06      # only these
+    python tools/build_notebooks.py T00 T06    # only these
     python tools/build_notebooks.py --no-exec  # build only
 """
 

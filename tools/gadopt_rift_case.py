@@ -28,6 +28,46 @@ velocity U0, viscosities by a reference mu0, so stress scales as mu0*U0/H.
 
 Usage:
     python3 gadopt_rift_case.py --steps 20 --nx 128 --ny 64
+
+Invariants, and why they are checked every step
+-----------------------------------------------
+A conservative level set is a smoothed indicator function: its value IS the
+volume fraction of material above the interface, so it lives in [0, 1] by
+definition. `material_field` blends layer properties by interpolating in psi,
+which means it will happily extrapolate a density no rock has if psi leaves
+that interval.
+
+The first production run of this script (400 steps, 96x48, 2 h 22 min) ended
+with level sets spanning [-1.72, 3.02] and a density field with mantle at the
+surface and crustal density at 90 km depth. Every plot made from it was
+uninterpretable. The range was already being measured -- and only printed, once,
+at the end. Both invariants are now checked inside the time loop and raise.
+
+Reinitialisation, measured
+--------------------------
+The drift is a reinitialisation deficit, not an advection-scheme failure. At
+64x32, q0 = 0.055, 20 steps, varying only the number of reinitialisation steps
+per timestep:
+
+    reinitialisation steps   psi excursion beyond [0,1]   wall clock
+             2 (old default)          0.0277                481 s
+             6                        0.0148                493 s
+            12 (new default)          0.0048                506 s
+
+A six-fold reduction in drift for 5% more wall-clock, because the Stokes solve
+dominates the cost and reinitialisation is nearly free beside it. At the old
+default the excursion grew roughly exponentially and the layering check failed
+by step 34.
+
+A secondary contributor, worth knowing about: the Picard iteration stalls at a
+relative residual of ~3e-4 and Newton fails at essentially every step, so the
+advecting velocity is not the exact Stokes solution and is not exactly
+divergence-free. Measured as ||div u|| / ||grad u||, the rift case gives 0.52 at
+64x32 against 0.09 for the well-converged instantaneous case in
+`gadopt_lithosphere_case.py` at the same resolution. Advection preserves the
+bounds of a level set only for a divergence-free field, so that excess feeds the
+drift too. Raising the Picard cap does not help -- the iteration genuinely
+stagnates, and `tools/rift_divergence_probe.py` measures both quantities.
 """
 
 import argparse
@@ -36,7 +76,17 @@ import sys
 import time
 
 import numpy as np
-from gadopt import *
+
+# PETSc parses `sys.argv` when it initialises, which happens on import, and then
+# complains at exit about every flag it did not recognise -- all of ours:
+#     WARNING! There are options you set that were not used!
+#     Option left: name:--heatflow value: 0.040 source: command line
+# Harmless, but it buries the real output of a long run. Hide our arguments from
+# PETSc for the duration of the import and put them back afterwards.
+_ARGV = sys.argv[:]
+sys.argv = sys.argv[:1]
+from gadopt import *  # noqa: E402
+sys.argv = _ARGV
 
 sys.path.insert(0, "..")
 sys.path.insert(0, ".")
@@ -53,7 +103,7 @@ T_SCALE = H / U0                # time scale, s
 
 
 def build(nx, ny, aspect=2.0, damper=1e21, seed_halfwidth_km=25.0,
-          heat_flow=0.055):
+          heat_flow=0.055, reini_steps=12, reini_factor=0.5):
     """Assemble mesh, fields, rheology and solvers. Returns a dict of handles."""
     mesh = RectangleMesh(nx, ny, aspect, 1.0, quadrilateral=True)
     mesh.cartesian = True
@@ -207,7 +257,8 @@ def build(nx, ny, aspect=2.0, damper=1e21, seed_halfwidth_km=25.0,
     # step to epsilon makes the model resolution-independent, which is the
     # difference between a demo and something you can refine.
     eps_min = float(epsilon.dat.data_ro.min())
-    reini = {"epsilon": epsilon, "timestep": 0.5 * eps_min, "steps": 2}
+    reini = {"epsilon": epsilon, "timestep": reini_factor * eps_min,
+             "steps": reini_steps}
     ls_solver = [LevelSetSolver(psi, adv_kwargs={"u": u_fn, "timestep": dt},
                                 reini_kwargs=reini)
                  for psi in ls]
@@ -252,6 +303,44 @@ def check_layering(m):
         out[label] = dict(expected=expect, got=round(got, 1),
                           ok=abs(got - expect) < 25.0)
     return out
+
+
+class AdvectionBroke(RuntimeError):
+    """Raised when a conservative level set leaves [0, 1].
+
+    This is not a warning. A conservative level set is a smoothed indicator
+    function: its value IS the volume fraction of the material above the
+    interface, so it is in [0, 1] by definition. Once it is not, every field
+    derived from it is meaningless, because `material_field` blends layer
+    properties by linear interpolation in psi -- feed it psi = 2.7 and it
+    happily extrapolates a density no rock has.
+
+    The 400-step production run of 6 August ended with level sets spanning
+    [-1.72, 3.02] and a density field with mantle at the surface and crust at
+    90 km depth. That run cost 2 h 22 min and its output was uninterpretable.
+    The range was already being measured -- and only printed, at the end. Hence
+    this exception, and the per-step check that raises it.
+    """
+
+
+class MaterialNotConserved(RuntimeError):
+    """Raised when the volume of a material changes during the run.
+
+    For incompressible flow and a conservative level set, ``\\int psi dx`` is
+    the volume of the material above that interface and is exactly conserved.
+    Drift in it means the advection is creating or destroying material, which is
+    the failure mode that ruined the first production run.
+
+    This replaces an earlier per-step check that compared mean density inside
+    *fixed depth windows* against 2700 / 2900 / 3300. That check was wrong by
+    construction, and instructively so: in a model that extends, the layers
+    move, so a window fixed at 22-38 km starts sampling upper crust and the mean
+    density falls whether or not anything has gone wrong. It duly failed at step
+    39 -- at the same step and to the same digit -- both with the old
+    reinitialisation settings and with settings that reduced the level-set drift
+    tenfold, which is what gave it away. Volume conservation is invariant under
+    deformation; a depth window is not.
+    """
 
 
 class PicardDiverged(RuntimeError):
@@ -362,10 +451,46 @@ def solve_stokes(m, picard_iters, tol=1e-4, cold=False, u_sane=1e3):
         return used, False, hist         # Picard result stands; keep going
 
 
-def run(m, steps):
-    """Step: Stokes -> advect level sets -> advect plastic strain."""
-    hist = []
+def level_set_range(m):
+    """(min, max) of every level set. The invariant is [0, 1]."""
+    return [(float(p.dat.data_ro.min()), float(p.dat.data_ro.max()))
+            for p in m["ls"]]
+
+
+def material_volumes(m):
+    """``\\int psi dx`` for each level set — the volume of material above it."""
+    return [float(assemble(p * dx)) for p in m["ls"]]
+
+
+def volume_drift(m):
+    """Largest relative change in any material volume since t = 0."""
+    v0 = m["v0"]
+    return max(abs(v - r) / max(abs(r), 1e-300)
+               for v, r in zip(material_volumes(m), v0))
+
+
+def run(m, steps, ls_tol=0.05, vol_tol=None, strict=True):
+    """Step: Stokes -> advect level sets -> advect plastic strain.
+
+    Two invariants are checked *inside* the loop, because both of the things
+    that went wrong on the first production run were invisible from outside it:
+
+    * every level set stays within ``ls_tol`` of [0, 1];
+    Material volume drift is *reported* every step but not enforced, because
+    this domain is open at the sides — see :class:`MaterialNotConserved`.
+    Pass ``vol_tol`` explicitly if you have a closed-box variant.
+
+    With ``strict`` (the default) a violation raises and the run stops there,
+    which is the point -- a broken run should cost you a minute, not an
+    afternoon. Pass ``strict=False`` and a large ``ls_tol`` to survey how a
+    quantity degrades rather than to stop at the first sign of it.
+    """
+    # Kept on `m` rather than local, so the caller still has the per-step record
+    # when one of the invariant checks below raises out of this loop.
+    hist = m.setdefault("_hist", [])
+    m.setdefault("v0", material_volumes(m))
     t0 = time.perf_counter()
+    broke_at = None
     for n in range(steps):
         pic, newton_ok, res = solve_stokes(m, picard_iters=120 if n == 0 else 30,
                                            cold=(n == 0))
@@ -381,14 +506,48 @@ def run(m, steps):
             s.solve()
         m["strain_solver"].solve()
 
+        lsr = level_set_range(m)
+        lo = min(r[0] for r in lsr)
+        hi = max(r[1] for r in lsr)
+        excursion = max(-lo, hi - 1.0, 0.0)
+        vdrift = volume_drift(m)
+
         sd = m["strain"].dat.data_ro
-        hist.append(dict(step=n, picard=pic, newton=newton_ok,
-                         strain_max=float(sd.max()),
-                         strain_mean=float(sd.mean()),
-                         weak_fraction=float((sd > 1.5).mean())))
+        rec = dict(step=n, picard=pic, newton=newton_ok,
+                   strain_max=float(sd.max()),
+                   strain_mean=float(sd.mean()),
+                   weak_fraction=float((sd > 1.5).mean()),
+                   ls_min=round(lo, 5), ls_max=round(hi, 5),
+                   ls_excursion=round(excursion, 5),
+                   volume_drift=round(vdrift, 6),
+                   courant=round(umax * float(m["dt"]) / m["h_min"], 4))
         print(f"  step {n:3d}  picard {pic:3d} (res {res[-1]:.2e})  "
               f"newton {'ok' if newton_ok else 'FAILED'}  |u|max {umax:.2f}  "
-              f"dt {float(m['dt']):.2e}  strain max {sd.max():.3f}", flush=True)
+              f"dt {float(m['dt']):.2e}  Co {rec['courant']:.3f}  "
+              f"psi [{lo:+.4f}, {hi:+.4f}]  dV {vdrift:.2e}  "
+              f"strain max {sd.max():.3f}", flush=True)
+
+        if excursion > ls_tol and broke_at is None:
+            broke_at = n
+            print(f"  ** level set left [0, 1] by {excursion:.4f} at step {n} **",
+                  flush=True)
+            if strict:
+                hist.append(rec)
+                raise AdvectionBroke(
+                    f"level set range [{lo:.4f}, {hi:.4f}] at step {n}: the "
+                    f"conservative level set must stay in [0, 1]. Everything "
+                    f"downstream of the material field is now meaningless.")
+
+        if vol_tol is not None and vdrift > vol_tol:
+            print(f"  ** material volume drifted {vdrift:.3%} at step {n} **",
+                  flush=True)
+            if strict:
+                hist.append(rec)
+                raise MaterialNotConserved(
+                    f"material volume changed by {vdrift:.3%} at step {n}; "
+                    f"incompressible flow conserves it exactly.")
+
+        hist.append(rec)
     return hist, time.perf_counter() - t0
 
 
@@ -404,11 +563,31 @@ if __name__ == "__main__":
                     help="seed half-width in km")
     ap.add_argument("--damper", type=float, default=1e21,
                     help="plastic damper viscosity, Pa s (cookbook: 1e21)")
+    ap.add_argument("--reini-steps", type=int, default=12,
+                    help="level-set reinitialisation steps per timestep. The "
+                         "old default of 2 let psi drift out of [0, 1]; see the "
+                         "measurement in the module docstring")
+    ap.add_argument("--reini-factor", type=float, default=0.5,
+                    help="reinitialisation pseudo-timestep, in units of epsilon")
+    ap.add_argument("--ls-tol", type=float, default=0.05,
+                    help="how far a level set may stray outside [0, 1] before "
+                         "the run is abandoned")
+    ap.add_argument("--vol-tol", type=float, default=None,
+                    help="abort if a material's volume drifts by more than this. "
+                         "Off by default: the domain is open at the sides, so "
+                         "volume is not conserved for legitimate reasons")
+    ap.add_argument("--no-strict", action="store_true",
+                    help="log invariant violations but keep going; for surveying "
+                         "how a quantity degrades, not for production")
+    ap.add_argument("--history", default=None,
+                    help="write the per-step record to this JSON file")
     args = ap.parse_args()
 
     m = build(args.nx, args.ny, damper=args.damper,
               seed_halfwidth_km=args.seed_km,
-              heat_flow=args.heatflow)
+              heat_flow=args.heatflow,
+              reini_steps=args.reini_steps,
+              reini_factor=args.reini_factor)
 
     layering = check_layering(m)
     for k, v in layering.items():
@@ -416,13 +595,28 @@ if __name__ == "__main__":
               f"{'OK' if v['ok'] else 'MISMATCH'}", flush=True)
     if not all(v["ok"] for v in layering.values()):
         raise SystemExit("layer ordering wrong — check the material_field list order")
+    # This is an INITIALISATION check only. It compares mean density in fixed
+    # depth windows, which is exactly right for catching a mis-ordered
+    # `material_field` list at t = 0 and exactly wrong as a runtime invariant,
+    # because a model that extends moves its layers out of those windows. The
+    # runtime invariants are in `run()`.
 
-    hist, secs = run(m, args.steps)
+    # Run, but always write the output — the state at the moment an invariant
+    # broke is the most informative snapshot there is, and throwing it away
+    # would mean re-running to see it.
+    failure = None
+    t0 = time.perf_counter()
+    try:
+        hist, secs = run(m, args.steps, ls_tol=args.ls_tol,
+                         vol_tol=args.vol_tol, strict=not args.no_strict)
+    except (AdvectionBroke, MaterialNotConserved, PicardDiverged) as exc:
+        failure = f"{type(exc).__name__}: {exc}"
+        hist, secs = m.setdefault("_hist", []), time.perf_counter() - t0
+        print(f"\nRUN ABANDONED — {failure}\n"
+              "Saving the state at failure anyway; the fields below are the "
+              "last ones computed.", flush=True)
 
-    # Level sets must stay in [0, 1]: that is the conservative-level-set
-    # invariant, and its violation is the first sign advection has gone wrong.
-    ls_range = [(float(p.dat.data_ro.min()), float(p.dat.data_ro.max()))
-                for p in m["ls"]]
+    ls_range = level_set_range(m)
 
     # Sample onto a REGULAR grid. Saving raw dof arrays is useless for
     # plotting: CG2 dofs sit at vertices, edge midpoints and cell interiors in
@@ -444,10 +638,11 @@ if __name__ == "__main__":
     # CG1 cannot overshoot a monotone jump, and positive fields are clipped as
     # a second line of defence.
     P1 = FunctionSpace(m["mesh"], "CG", 1)
+    ev = PointEvaluator(m["mesh"], pts, tolerance=1e-8)   # `Function.at` is deprecated
 
     def grid(expr, positive=False):
         f = Function(P1).interpolate(expr)
-        g = np.array(f.at(pts, tolerance=1e-8)).reshape(nys, nxs)[::-1]
+        g = np.asarray(ev.evaluate(f)).reshape(nys, nxs)[::-1]
         return np.maximum(g, 0.0) if positive else g
 
     out = dict(
@@ -459,29 +654,52 @@ if __name__ == "__main__":
         density=grid(m["rho"], positive=True),
         weakening=grid(m["w"], positive=True),
     )
-    uu = np.array(m["u"].at(pts, tolerance=1e-8)).reshape(nys, nxs, 2)[::-1]
+    uu = np.asarray(ev.evaluate(m["u"])).reshape(nys, nxs, 2)[::-1]
     out["vx"], out["vz"] = uu[..., 0], -uu[..., 1]
     np.savez(args.out, **out)
 
-    # Localisation metric. A rift concentrates strain at the seed and unloads
-    # its surroundings; diffuse thinning raises both equally. The ratio is the
-    # number to watch, not the absolute strain.
+    # Diagnostics.
+    #
+    # There is deliberately NO localisation ratio here any more. A max/mean or
+    # in-seed/outside ratio was reported for several rounds of this model and
+    # misled every time, because it is maximised by a run in which nothing
+    # deforms outside the seed -- including runs where nothing deforms at all,
+    # and the run of 6 August, where the "strain" being ratioed was an artefact
+    # of a corrupted material field. Absolute in-seed and outside strains are
+    # reported instead; judge them together, and only after `layering_ok` and
+    # `level_set_range` say the fields mean anything.
     xk, zk, st = out["x_km"], out["depth_km"], out["strain"]
-    inseed = np.abs(xk[None, :] - 100.0) < 25.0
+    inseed = np.abs(xk[None, :] - 100.0) < args.seed_km
     crust = (zk[:, None] > 5.0) & (zk[:, None] < 40.0)
-    s_in = float(st[np.broadcast_to(inseed, st.shape) & np.broadcast_to(crust, st.shape)].mean())
-    s_out = float(st[(~np.broadcast_to(inseed, st.shape)) & np.broadcast_to(crust, st.shape)].mean())
+    sel = np.broadcast_to(inseed, st.shape) & np.broadcast_to(crust, st.shape)
+    out_sel = (~np.broadcast_to(inseed, st.shape)) & np.broadcast_to(crust, st.shape)
+    s_in, s_out = float(st[sel].mean()), float(st[out_sel].mean())
+
+    excursion = max(max(-lo for lo, _ in ls_range),
+                    max(hi - 1.0 for _, hi in ls_range), 0.0)
+
+    if args.history:
+        with open(args.history, "w") as fh:
+            json.dump(hist, fh, indent=1)
+        print(f"wrote per-step history to {args.history}", flush=True)
 
     print("RESULT " + json.dumps(dict(
+        failure=failure,
+        steps_completed=len(hist), steps_requested=args.steps,
         damper=args.damper, seed_km=args.seed_km, heat_flow=args.heatflow,
+        reini_steps=args.reini_steps, reini_factor=args.reini_factor,
+        nx=args.nx, ny=args.ny, seconds=round(secs, 2),
+        # Trust nothing below this line unless both of these are clean.
+        level_set_range=ls_range,
+        level_set_excursion=round(excursion, 5),
+        volume_drift=round(volume_drift(m), 6),
         strain_in_seed=round(s_in, 4),
         strain_outside=round(s_out, 4),
-        localisation=round(s_in / max(s_out, 1e-9), 3),
-        steps=args.steps, nx=args.nx, ny=args.ny, seconds=round(secs, 2),
-        level_set_range=ls_range,
-        strain_max_initial=round(hist[0]["strain_max"], 3),
-        strain_max_final=round(hist[-1]["strain_max"], 3),
-        strain_mean_final=round(hist[-1]["strain_mean"], 5),
-        weak_fraction_final=round(hist[-1]["weak_fraction"], 5),
+        strain_max_initial=round(hist[0]["strain_max"], 3) if hist else None,
+        strain_max_final=round(hist[-1]["strain_max"], 3) if hist else None,
+        strain_mean_final=round(hist[-1]["strain_mean"], 5) if hist else None,
+        weak_fraction_final=round(hist[-1]["weak_fraction"], 5) if hist else None,
         output=args.out,
     )), flush=True)
+    if failure:
+        raise SystemExit(1)
