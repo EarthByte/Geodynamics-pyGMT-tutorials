@@ -382,7 +382,7 @@ def solve_stokes(m, picard_iters, tol=1e-4, cold=False, u_sane=1e3):
     # standard safeguard for a non-monotone fixed-point iteration, and it makes
     # the outcome independent of where you happen to stop.
     used, hist = 0, []
-    omega = m.get("omega0", 0.5)
+    omega = m.get("omega0", 0.7)
     Zs = m["z"].function_space()
     z_prev, z_raw = Function(Zs), Function(Zs)
     z_best = Function(Zs)
@@ -420,35 +420,84 @@ def solve_stokes(m, picard_iters, tol=1e-4, cold=False, u_sane=1e3):
         if du < tol:
             break
 
+        # Adapt omega GENTLY, and with a floor high enough to still move.
+        #
+        # The previous rule halved omega on any increase in the residual, with a
+        # floor of 0.05. Because this iteration is genuinely non-monotone, the
+        # residual rises most steps, so omega ratcheted to the floor within six
+        # iterations and stayed there for the rest of the run — measured, in the
+        # 45-iteration trace: omega hit 0.05 at iteration 6 and never recovered
+        # above 0.065. At that damping each iterate is a 5% step and the
+        # iteration cannot go anywhere, so the residual plateaued at ~1e-3 and
+        # the whole thing looked like stagnation. It was self-inflicted.
+        #
+        # Back off only on a substantial rise, back off less far, and never
+        # below a fraction that can still make progress.
         if len(hist) > 1:
-            if hist[-1] > hist[-2]:
-                omega = max(0.05, 0.5 * omega)      # back off
-            elif hist[-1] < 0.5 * hist[-2]:
-                omega = min(1.0, 1.3 * omega)       # converging well, push on
+            if hist[-1] > 1.5 * hist[-2]:
+                omega = max(0.25, 0.7 * omega)
+            elif hist[-1] < 0.8 * hist[-2]:
+                omega = min(1.0, 1.2 * omega)
 
-        # Genuine stagnation: a long window with no new best. Not merely "the
-        # residual went up", which happens routinely here.
-        if i - best_at > 25:
-            break
-
-    # Restore the best iterate found, not whichever one we stopped on.
-    m["z"].assign(z_best)
-    hist.append(best_du)
+    # KEEP THE LAST ITERATE, not the one with the smallest update.
+    #
+    # An earlier version restored the iterate that minimised `du`, on the
+    # standard reasoning that a non-monotone fixed-point iteration should not be
+    # judged by wherever you happened to stop. That reasoning is right and the
+    # implementation was wrong, because `du` is the change BETWEEN successive
+    # iterates, not a measure of nonlinear error, and it is smallest at
+    # iteration 0 for a reason that has nothing to do with accuracy: the
+    # isoviscous warm-up hands over a smooth field and the first plastic solve
+    # barely moves it. Every strategy tried -- adaptive omega, fixed omega at
+    # 0.3, 0.7 and 1.0, Anderson acceleration at depth 5 and 10 -- reported the
+    # identical "best" of 3.006e-4, at iteration 0, every time.
+    #
+    # Judged by a measure that is independent of this bookkeeping -- the
+    # relative divergence ||div u|| / ||grad u||, which is zero for any true
+    # Stokes solution -- iteration 0 is the WORST iterate available:
+    #
+    #     iterate 0 (the old "best")            rel div 0.52
+    #     iterate 40 (simply the last)          rel div 0.07 - 0.12
+    #     converged instantaneous case, same nx rel div 0.09
+    #
+    # So the safeguard was selecting a field five times less incompressible than
+    # the one it discarded, and that field is what advected the level sets
+    # through every production run.
+    hist.append(du)
 
     # The boundary velocity is 1 by construction, so a converged solution is
     # O(1-10). Anything vastly larger is not a solution, whatever the solver
-    # reported.
+    # reported. `z_best` is still the fallback for that case -- not because it
+    # is accurate, but because it is bounded.
     umax = float(np.abs(m["u"].dat.data_ro).max())
     if not np.isfinite(umax) or umax > u_sane:
-        raise PicardDiverged(
-            f"|u|max = {umax:.3e}, but the boundary velocity is 1 — "
-            "the Stokes solution is not physical")
+        m["z"].assign(z_best)
+        umax = float(np.abs(m["u"].dat.data_ro).max())
+        if not np.isfinite(umax) or umax > u_sane:
+            raise PicardDiverged(
+                f"|u|max = {umax:.3e}, but the boundary velocity is 1 — "
+                "the Stokes solution is not physical")
 
+    # A FAILED Newton solve does not leave the Picard result in place. PETSc has
+    # already written its last, diverged iterate into `z` by the time the
+    # exception is raised, so the old comment here -- "Picard result stands" --
+    # was wrong, and the |u|max of 5.7 and rel div of 0.52 seen in the
+    # production runs came partly from keeping it. Snapshot before trying, and
+    # roll back if it fails.
+    z_pre_newton = Function(m["z"].function_space())
+    z_pre_newton.assign(m["z"])
     try:
         m["stokes"].solve()              # Newton polish, now close enough
-        return used, True, hist
     except ConvergenceError:
-        return used, False, hist         # Picard result stands; keep going
+        m["z"].assign(z_pre_newton)
+        return used, False, hist
+    # Even a "converged" Newton step is only worth keeping if it did not move
+    # the answer somewhere unphysical.
+    umax = float(np.abs(m["u"].dat.data_ro).max())
+    if not np.isfinite(umax) or umax > u_sane:
+        m["z"].assign(z_pre_newton)
+        return used, False, hist
+    return used, True, hist
 
 
 def level_set_range(m):

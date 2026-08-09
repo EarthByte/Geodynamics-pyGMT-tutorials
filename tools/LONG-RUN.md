@@ -68,6 +68,59 @@ a run in which nothing deforms outside the seed. Absolute in-seed and outside
 strains are reported instead — but read them only after the invariants below are
 clean.
 
+## The solve path — two bugs, and the model now localises
+
+Added 7 August, after the reinitialisation fix. These turned out to matter more
+than reinitialisation did.
+
+**The safeguard was keeping the worst iterate.** `solve_stokes` used to restore
+the Picard iterate with the smallest update norm `du`, on the reasoning that a
+non-monotone iteration should not be judged by wherever you stop. Sound
+reasoning, wrong quantity: `du` is the change *between successive iterates*, and
+it is smallest at iteration 0 because the isoviscous warm-up hands over a smooth
+field that the first plastic solve barely moves. Every strategy tried — adaptive
+omega, fixed omega at 0.3, 0.7 and 1.0, Anderson acceleration at depth 5 and 10 —
+reported the identical "best" of 3.006e-4, always at iteration 0. Judged by
+relative divergence ‖∇·u‖/‖∇u‖, which is zero for any true Stokes solution,
+iteration 0 is the *worst* iterate available: 0.52, against 0.07–0.12 for simply
+taking the last one. The driver now keeps the last iterate.
+
+**A failed Newton solve was being kept.** PETSc writes its last diverged iterate
+into `z` before raising, so the old comment "Picard result stands; keep going"
+described something the code did not do. The Picard result is now snapshotted and
+restored on failure.
+
+**And the under-relaxation was strangling itself.** The old rule halved omega on
+any increase in `du`, floor 0.05. Since this iteration is genuinely non-monotone,
+omega hit the floor by iteration 6 and never recovered above 0.065 — each step
+then moved 5% and nothing could converge. Now: back off only on a rise of more
+than 1.5×, by a factor of 0.7, floor 0.25.
+
+Together, at 64×32, 40 steps:
+
+| | before | after |
+|---|---|---|
+| Picard | 30 iterations (the cap), residual 1e-2 to 5e-2 | 15–21 iterations, residual 9e-5 |
+| Newton | failed every step | succeeds most steps |
+| ‖∇·u‖/‖∇u‖ | 0.52 | 0.11 (control: 0.09) |
+| psi excursion at step 40 | 0.36 | **0.010** |
+| in-seed / outside strain | 1.31 / 0.55 | **1.31 / 0.10** |
+| strain max | 1.77 (seeded max 1.5) | **2.75** |
+
+**The model localises.** In-seed strain is 13× the surroundings, peak strain grows
+well past the seeded maximum, and the fully-weakened fraction is 0.9% — a
+localised weak zone, not a domain that has failed everywhere. The strain field
+shows a symmetric conjugate pair dipping inward from ~45 km at x = 75 and 125 km,
+converging beneath the axis at ~30 km, with steep faults through the brittle
+upper crust reaching the surface at x = 90–110 km. That is the narrow-rift
+geometry.
+
+One thing to sanity-check against your own expectations rather than mine: in this
+parameterisation the *lower crust* is the strongest layer (~10²⁶ Pa s at 25–40 km),
+not the mantle lithosphere. That follows from the Naliboff & Buiter wet-anorthite
+flow law at these temperatures, and it is a real modelling choice — the jelly
+sandwich versus crème brûlée question — not a numerical artefact.
+
 ## Read the RESULT line in this order
 
 ```
