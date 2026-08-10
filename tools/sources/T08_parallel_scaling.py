@@ -237,7 +237,7 @@ for nx in GRIDS:
 # parallelism to fit the suite's runtime budget — which is exactly why
 # parallelism is a *topic here* rather than an invisible requirement everywhere.
 #
-# The rung that does need it is the **cylindrical annulus** (T13). At G-ADOPT's
+# The rung that does need it is the **cylindrical annulus** (T14). At G-ADOPT's
 # default settings it exceeded 50 minutes serial on two slow cores and projects
 # to roughly 100 minutes. That is a real problem, at a size where MPI genuinely
 # pays — and the fix is either a coarser steady-state tolerance or `mpiexec`.

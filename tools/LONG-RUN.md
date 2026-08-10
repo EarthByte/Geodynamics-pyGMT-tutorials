@@ -206,6 +206,63 @@ docker run --rm -v $PWD:/work -w /work \
   python3 tools/plot_rift.py rift_long.npz --prefix rift_long
 ```
 
+## What actually stops the run: the neck reaches the mesh
+
+The 80-step run at 96x48 aborted at step 40 — correctly, and for a reason worth
+knowing. `AdvectionBroke`, excursion 0.053, after 14 minutes rather than the
+50 the full 80 steps would have taken.
+
+The history file shows two different things happening.
+
+`psi_min` drifts steadily negative from step 0, reaching −0.018 by step 36 and
+then flattening. That is ordinary undershoot and it self-limits.
+
+`psi_max` is the one that breaks, and it breaks **suddenly**. Up to step 36 it
+grows at about +0.0005 per step. From step 37: +0.0071, +0.0091, +0.0095,
++0.0091 — an eighteen-fold jump, with nothing else in the record changing.
+Courant is flat at 0.20, Picard converges in 16–19 iterations throughout, peak
+strain rises smoothly through 2.47, 2.48, 2.49, 2.52.
+
+The cause is in the geometry. Measured on the saved state:
+
+| x (km) | upper crust | lower crust |
+|---|---|---|
+| 10 | 26.0 km | 20.3 km |
+| 70 | 25.5 km | 19.8 km |
+| **101.6 (axis)** | 30.2 km | **7.3 km** |
+| 130 | 26.0 km | 19.3 km |
+| 190 | 26.6 km | 19.8 km |
+
+**The lower crust has necked from 20 km to 7.3 km at the rift axis — 3.5 vertical
+cells.** A conservative level set carries a tanh profile roughly one cell wide on
+each side of the interface, so at 3.5 cells the two interfaces bounding that
+layer are touching, and the reinitialisation of each pushes the other out of
+[0, 1]. That is the representational limit of the method, not a bug and not a
+tuning problem: you cannot resolve a layer thinner than a few interface
+thicknesses.
+
+It is also the right kind of failure. The model stopped and said it could no
+longer represent the geometry, rather than continuing for another forty steps
+and producing something that looked like a rift.
+
+**The state at step 40 is usable.** An excursion of 5% is not the 300% of the
+first production run; the density field is layered everywhere except at the neck,
+and the strain field shows a clean conjugate pair converging beneath the axis at
+~32 km with a multi-strand fault array through the upper crust. Treat step ~36 as
+the endpoint for this configuration.
+
+(Note also that the interfaces on the flanks have descended uniformly from 20 and
+40 km to 26 and 46 km. That is the fictitious top inflow, 6 km after 40 steps
+against the 8 km predicted above — the free-surface horizon and the necking limit
+are converging on the same run length from two different directions.)
+
+**To go further you need resolution at the neck**, and refining uniformly buys
+little: 128x64 halves the cell to 1.56 km, so the same layer can neck to about
+5.5 km instead of 7.3 before hitting the same wall, at 2.3x the cost per step.
+The answer is adaptive refinement on the interfaces — G-ADOPT's
+`RiemannianMetric` plus `adapt`, re-adapting every few steps, as in its
+`adaptive_base_case` demo.
+
 ## Geometry — it is a full rift, not one flank
 
 200 km wide, 100 km deep, seed at x = 100 km, `left: ux = -1` and

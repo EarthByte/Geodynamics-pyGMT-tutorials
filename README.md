@@ -65,12 +65,13 @@ localisation, a free surface, and large finite strain.
 | # | Notebook | Runtime |
 |---|---|---|
 | 09 | Visco-plasticity and shear bands: what localises, and what only looks like it | **about 3 min (measured)** |
+| 10 | A rift, and the point at which it stops being one | **13 min (measured)** |
 
 Planned, not yet built:
 
-* **T10** — the same benchmark made time-dependent: material advection, accumulated plastic strain, strain weakening — a rift
-* **T11** — rifting modes: narrow vs wide, set by crustal strength and geotherm
-* **T12** — orogenic wedges: critical taper and thrust sequences
+* **T11** — resolving what T10 could not: adaptive refinement at the neck, and a free surface so the model can subside instead of importing rock through a flat lid
+* **T12** — rifting modes: narrow vs wide, set by crustal strength and geotherm
+* **T13** — orogenic wedges: critical taper and thrust sequences
 
 **This turns out to be far cheaper than expected.** G-ADOPT already ships a
 kinematically-driven, visco-plastic lithospheric model — it is simply not
@@ -109,7 +110,17 @@ and the model picks Roscoe.
 The Spiegelman case is **instantaneous** — one nonlinear solve, no advection, no
 evolving topography, no temperature, no strain weakening. A research-grade rift
 model needs all of those. Every ingredient exists in G-ADOPT already; what does
-not exist is the combination:
+not exist is the combination. **T10 assembles the first three of these** and the
+model localises: a symmetric conjugate pair beneath the axis, a multi-strand
+fault array through the brittle crust, in-seed strain 14x the surroundings, and
+peak strain growing well past the seeded maximum.
+
+It then stops being valid after about forty steps, for two independent and
+derivable reasons — a flat lid that imports 200 m of rock per step, and a lower
+crust that necks down to 3.5 mesh cells — which is what T11 is for. Both limits
+are worked out in the notebook rather than discovered by accident, and the run
+now aborts itself when the conservative level set leaves [0, 1] rather than
+producing four hundred steps of nonsense.
 
 | Requirement | G-ADOPT capability | Status |
 |---|---|---|
@@ -131,10 +142,10 @@ one structural complication rather than several at once.
 
 ### Part 4 — mantle scale, planned
 
-* **T13** — the 2-D cylindrical annulus (see the note below)
-* **T14** — driving the annulus with pyGPlates surface velocities
+* **T14** — the 2-D cylindrical annulus (see the note below)
+* **T15** — driving the annulus with pyGPlates surface velocities
 
-> **Note on the planned T13.** The annulus at G-ADOPT's default settings
+> **Note on the planned T14.** The annulus at G-ADOPT's default settings
 > (128×32, Ra = 1e5, steady-state tolerance 1e-7) exceeded 50 minutes serial on a
 > 2-core cloud container and projects to roughly 100 minutes. On a modern laptop
 > that is ~30 min serial, and comfortably less under MPI. The notebook relaxes the
