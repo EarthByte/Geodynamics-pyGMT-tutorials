@@ -139,9 +139,60 @@ T_SCALE = H / U0                # time scale, s
 
 
 def build(nx, ny, aspect=2.0, damper=1e21, seed_halfwidth_km=25.0,
-          heat_flow=0.055, reini_steps=12, reini_factor=0.5):
+          heat_flow=0.055, reini_steps=12, reini_factor=0.5,
+          free_surface=False, cluster_x=0.0, cluster_y=0.0,
+          fs_bug="none"):
     """Assemble mesh, fields, rheology and solvers. Returns a dict of handles."""
     mesh = RectangleMesh(nx, ny, aspect, 1.0, quadrilateral=True)
+
+    # MESH GRADING, in place of adaptive refinement.
+    #
+    # T10's run ends when the necking lower crust thins to about 3.5 cells and
+    # the two level sets bounding it start to overlap. The textbook answer is
+    # metric-based adaptivity -- `animate`'s RiemannianMetric plus `adapt` --
+    # and it is not available here. `adapt` drives Mmg through PETSc; the
+    # Firedrake image's PETSc is configured without --download-mmg or
+    # --download-parmmg (checked: no MMG symbols in petscconf.h, no mmg in the
+    # recorded CONFIGURE_OPTIONS), and `animate` is not installed. Enabling it
+    # means rebuilding PETSc and Firedrake from source on two architectures, and
+    # Mmg adapts only simplex meshes, so it would additionally mean giving up
+    # the quadrilateral discretisation the rest of the suite uses. That is not a
+    # reasonable price for a teaching container.
+    #
+    # It is also not needed here, because we know in advance where the
+    # resolution has to go: the rift nucleates at the seed and the necking
+    # happens in the crust. Adaptivity earns its keep when you do NOT know.
+    #
+    # The map matters more than it looks. The obvious choice, s -> sign(s)|s|^p
+    # with p > 1, has zero derivative at s = 0, so cells at the axis collapse:
+    # at p = 1.6 the widest cell was 10.6x the narrowest, the aspect ratios went
+    # with it, and the level-set excursion after three steps was 0.0139 against
+    # 0.0002 on a uniform mesh -- seventy times worse, for a mesh that was
+    # supposed to help. (More reinitialisation did not touch it: 12 and 48
+    # sweeps gave byte-identical results.)
+    #
+    # This map instead has bounded derivative everywhere:
+    #
+    #     s' = arctanh(s * tanh(b)) / b        s in [-1, 1]
+    #
+    # At b = 1 the cell-size ratio across the domain is about 2.4, and cells at
+    # the centre are 0.76 of uniform. b = 0 is the identity.
+    def cluster(t, b):
+        """Map [-1, 1] to itself, concentrating points near 0. b = 0 is uniform."""
+        if b <= 0:
+            return t
+        return np.arctanh(np.clip(t, -1.0, 1.0) * np.tanh(b)) / b
+
+    if cluster_x > 0 or cluster_y > 0:
+        xy = mesh.coordinates.dat.data
+        c = aspect / 2.0
+        xy[:, 0] = c + c * cluster((xy[:, 0] - c) / c, cluster_x)
+        # Vertical: one-sided, concentrating rows towards the surface at y = 1,
+        # which is where the crust and every brittle-ductile transition are.
+        if cluster_y > 0:
+            d = np.clip(1.0 - xy[:, 1], 0.0, 1.0)
+            xy[:, 1] = 1.0 - np.arctanh(d * np.tanh(cluster_y)) / cluster_y
+
     mesh.cartesian = True
     boundary = get_boundary_ids(mesh)
 
@@ -149,10 +200,15 @@ def build(nx, ny, aspect=2.0, damper=1e21, seed_halfwidth_km=25.0,
     W = FunctionSpace(mesh, "CG", 1)
     Q = FunctionSpace(mesh, "CG", 2)          # plastic strain
     K = FunctionSpace(mesh, "Q", 2)           # level sets
-    Z = MixedFunctionSpace([V, W])
+    # A free surface adds one scalar unknown per free-surface boundary: eta, the
+    # surface displacement. It lives in the mixed space alongside velocity and
+    # pressure because the surface load and the flow are solved together --
+    # explicit coupling of a free surface to Stokes is notoriously unstable at
+    # timesteps anywhere near the ones we want.
+    Z = MixedFunctionSpace([V, W, W] if free_surface else [V, W])
 
     z = Function(Z)
-    u_, p_ = split(z)
+    u_, p_ = split(z)[:2]
     z.subfunctions[0].rename("Velocity")
     z.subfunctions[1].rename("Pressure")
     u_fn = z.subfunctions[0]
@@ -185,6 +241,7 @@ def build(nx, ny, aspect=2.0, damper=1e21, seed_halfwidth_km=25.0,
         return material_field(ls, [getattr(l, attr) for l in layers], interface=how)
 
     rho = mat("density")
+    rho_ref_buoy = float(LI.MANTLE_LITHOSPHERE.density)   # Boussinesq reference
     coh = mat("cohesion")
     fric = mat("friction_deg")
 
@@ -227,7 +284,25 @@ def build(nx, ny, aspect=2.0, damper=1e21, seed_halfwidth_km=25.0,
     #                  is zero and the plastic viscosity divides by it.
     #   `switch` = 1 : the real rheology.
     switch = Constant(1.0)
-    plith = rho * 9.81 * depth_nd * H / STRESS       # non-dimensional
+    # LITHOSTATIC PRESSURE, and the trap in adding buoyancy later.
+    #
+    # Without buoyancy the Stokes body force is zero, so the pressure the solver
+    # returns is purely dynamic and carries no lithostatic part. The
+    # Drucker-Prager yield stress needs the total pressure, so the lithostatic
+    # part is supplied analytically here and added to p.
+    #
+    # Turn buoyancy on for the free surface and that stops being true: the body
+    # force is -(rho - rho_ref) g, so p now contains everything except the
+    # REFERENCE lithostatic pressure rho_ref * g * z, which is absorbed into the
+    # reference state. Keeping the layered `plith` as well double-counts, roughly
+    # doubling the yield stress at depth. The symptom is unmistakable once you
+    # know it: the model stops yielding, peak strain decays instead of growing,
+    # and the rift quietly fails to form.
+    # `fs_bug='lithostatic'` deliberately keeps the layered plith with buoyancy
+    # on, reproducing the double-count for T11 to demonstrate.
+    plith_rho = (rho_ref_buoy if (free_surface and fs_bug != "lithostatic")
+                 else rho)
+    plith = plith_rho * 9.81 * depth_nd * H / STRESS
 
     # Naliboff & Buiter linear weakening, in UFL. `strain` is updated between
     # timesteps, so it is lagged by construction and does not enter the
@@ -275,15 +350,45 @@ def build(nx, ny, aspect=2.0, damper=1e21, seed_halfwidth_km=25.0,
     bcs = {boundary.left: {"ux": -1}, boundary.right: {"ux": 1},
            boundary.bottom: {"uy": 0}}          # top is stress-free
 
-    stokes = StokesSolver(z, BoussinesqApproximation(0, mu=mu), bcs=bcs)
+    # BUOYANCY, and why it only appears with the free surface.
+    #
+    # Without a free surface this model has none at all: it is driven purely
+    # kinematically, the layered density does nothing, and the flat lid supplies
+    # whatever normal stress it likes. A free surface cannot work that way --
+    # there has to be something for the topography to push back against, and
+    # that something is the weight of the rock.
+    #
+    # The equations are non-dimensionalised by the Spiegelman convention
+    # (lengths by H, velocities by U0, stress by mu0*U0/H), so a dimensional
+    # body force rho*g becomes rho * g * H^2 / (mu0 * U0). That group is BUOY
+    # below; it is about 0.124 per kg/m3, so a mantle density of 3300 gives a
+    # non-dimensional body force of ~409. Equivalently: a kilometre of
+    # topography weighs about 26 MPa against a driving stress of mu0*U0/H ~
+    # 8 MPa, which is why the surface matters at all.
+    BUOY = 9.81 * H**2 / (MU0 * U0)
+    def approx(viscosity):
+        if not free_surface:
+            return BoussinesqApproximation(0, mu=viscosity)
+        return BoussinesqApproximation(
+            0, mu=viscosity, g=1.0, RaB=BUOY, delta_rho=rho - rho_ref_buoy)
+
+    if free_surface:
+        # delta_rho_fs is the contrast across the surface: rock against nothing.
+        bcs[boundary.top] = {"free_surface": {"RaFS": BUOY, "delta_rho_fs": rho}}
+
+    kw = dict(bcs=bcs)
+    if free_surface:
+        kw["dt"] = dt                    # the free-surface balance needs it
+
+    stokes = StokesSolver(z, approx(mu), **kw)
 
     # Picard: identical problem, but the viscosity is evaluated at the PREVIOUS
     # iterate, making each solve linear. Slow but robust, where Newton is fast
     # but only converges once it is already close.
     z_pic = Function(Z)
-    u_pic, p_pic = split(z_pic)
+    u_pic, p_pic = split(z_pic)[:2]
     mu_pic = rheology(u_pic, p_pic)[0]
-    picard = StokesSolver(z, BoussinesqApproximation(0, mu=mu_pic), bcs=bcs)
+    picard = StokesSolver(z, approx(mu_pic), **kw)
 
     # Reinitialisation pseudo-timestep MUST scale with the interface thickness.
     # G-ADOPT's default is a fixed 0.02, while `interface_thickness` returns
@@ -313,7 +418,16 @@ def build(nx, ny, aspect=2.0, damper=1e21, seed_halfwidth_km=25.0,
                 ls_solver=ls_solver, strain=strain, strain_solver=strain_solver,
                 mu=mu, epsii=epsii, Q=Q, K=K, w=w, aspect=aspect, rho=rho,
                 mu_creep=mu_creep, mu_plast=mu_plast, X=X, H=H,
-                h_min=aspect / nx,
+                # Read the true minimum cell width from the mesh. On a graded
+                # mesh `aspect / nx` is the *average*, not the minimum, so the
+                # CFL limiter would be using a timestep several times too large
+                # for the smallest cells while reporting a comfortable Courant
+                # number.
+                fs_bug=fs_bug,
+                h_min=float(np.diff(np.unique(np.round(
+                    mesh.coordinates.dat.data[:, 0], 9))).min()),
+                free_surface=free_surface,
+                z_old=Function(Z),
                 picard=picard, z_pic=z_pic, switch=switch)
 
 
@@ -394,8 +508,39 @@ def solve_stokes(m, picard_iters, tol=1e-4, cold=False, u_sane=1e3):
 
     Returns (picard_iterations_used, newton_converged, residual_history).
     """
+    # THE FREE SURFACE AND THE PICARD LOOP DO NOT COMPOSE BY DEFAULT.
+    #
+    # G-ADOPT's `StokesSolver.solve()` ends with
+    #     self.solution_old.assign(self.solution)
+    # which is exactly right when one solve is one timestep. Our Picard loop
+    # calls solve() forty times per timestep, and the free-surface equation is
+    # (eta - eta_old)/dt = u.n -- so eta was being advanced once per ITERATION.
+    # Measured: 10 steps produced 80 km of subsidence instead of 2, a factor of
+    # 40, which is the iteration count.
+    #
+    # Every Picard iterate must solve the same time-discrete problem, so
+    # `solution_old` is reset to the start-of-step state before each solve. The
+    # two solver objects share `z` but each keeps its own `solution_old`, so both
+    # need it.
+    fs = m.get("free_surface", False)
+    # `fs_bug='time-level'` skips the rewind, so the free-surface equation
+    # advances once per Picard iteration instead of once per timestep. T11 runs
+    # it deliberately to show the factor-of-40 error it produces.
+    if fs and m.get("fs_bug") == "time-level":
+        fs = False
+    if fs:
+        z_old = m["z_old"]
+
+        def rewind():
+            m["picard"].solution_old.assign(z_old)
+            m["stokes"].solution_old.assign(z_old)
+    else:
+        def rewind():
+            pass
+
     if cold:
         m["switch"].assign(0.0)          # linear viscosity; breaks the 1/epsii
+        rewind()
         m["picard"].solve()              # singularity at u = 0
         m["switch"].assign(1.0)
 
@@ -427,6 +572,7 @@ def solve_stokes(m, picard_iters, tol=1e-4, cold=False, u_sane=1e3):
     for i in range(picard_iters):
         z_prev.assign(m["z"])
         m["z_pic"].assign(m["z"])
+        rewind()
         m["picard"].solve()
         z_raw.assign(m["z"])            # raw fixed-point image, kept separate
 
@@ -523,6 +669,7 @@ def solve_stokes(m, picard_iters, tol=1e-4, cold=False, u_sane=1e3):
     z_pre_newton = Function(m["z"].function_space())
     z_pre_newton.assign(m["z"])
     try:
+        rewind()
         m["stokes"].solve()              # Newton polish, now close enough
     except ConvergenceError:
         m["z"].assign(z_pre_newton)
@@ -586,6 +733,9 @@ def run(m, steps, ls_tol=0.05, vol_tol=None, strict=True):
         pic, newton_ok, res = solve_stokes(
             m, picard_iters=4 * m["picard_cap"] if n == 0 else m["picard_cap"],
             cold=(n == 0))
+
+        if m.get("free_surface", False):
+            m["z_old"].assign(m["z"])    # one time level per STEP, not per solve
 
         # CFL-limit the timestep from the ACTUAL velocity, not a guess. A fixed
         # timestep is a resolution-dependent bug waiting to happen: halve the
@@ -655,6 +805,17 @@ if __name__ == "__main__":
                     help="seed half-width in km")
     ap.add_argument("--damper", type=float, default=1e21,
                     help="plastic damper viscosity, Pa s (cookbook: 1e21)")
+    ap.add_argument("--fs-bug", choices=["none", "time-level", "lithostatic"],
+                    default="none",
+                    help="reintroduce a free-surface bug on purpose, for teaching")
+    ap.add_argument("--cluster-x", type=float, default=0.0,
+                    help="mesh clustering towards the rift axis (0 = uniform, "
+                         "1 gives a cell-size ratio of about 2.4)")
+    ap.add_argument("--cluster-y", type=float, default=0.0,
+                    help="mesh clustering towards the surface (0 = uniform)")
+    ap.add_argument("--free-surface", action="store_true",
+                    help="let the top boundary deform instead of holding it flat. "
+                         "Turns on buoyancy, which the kinematic model does not have")
     ap.add_argument("--picard-iters", type=int, default=40,
                     help="Picard iterations per step (the first step gets 4x)")
     ap.add_argument("--reini-steps", type=int, default=12,
@@ -681,7 +842,10 @@ if __name__ == "__main__":
               seed_halfwidth_km=args.seed_km,
               heat_flow=args.heatflow,
               reini_steps=args.reini_steps,
-              reini_factor=args.reini_factor)
+              reini_factor=args.reini_factor,
+              free_surface=args.free_surface,
+              cluster_x=args.cluster_x, cluster_y=args.cluster_y,
+              fs_bug=args.fs_bug)
     m["picard_cap"] = args.picard_iters
 
     layering = check_layering(m)
@@ -751,6 +915,15 @@ if __name__ == "__main__":
     )
     uu = np.asarray(ev.evaluate(m["u"])).reshape(nys, nxs, 2)[::-1]
     out["vx"], out["vz"] = uu[..., 0], -uu[..., 1]
+
+    if m["free_surface"]:
+        # eta is the surface displacement, carried as a third component of the
+        # mixed space. It is defined over the whole domain but pinned to zero in
+        # the interior, so only its trace on the top boundary means anything.
+        # Non-dimensionalised by H, so multiply by H for metres.
+        eta = np.asarray(ev.evaluate(m["z"].subfunctions[2])).reshape(nys, nxs)
+        out["topography_km"] = eta[-1] * H / 1e3      # top row, +ve = uplift
+        out["eta_field"] = eta[::-1]
     np.savez(args.out, **out)
 
     # Diagnostics.
@@ -783,11 +956,17 @@ if __name__ == "__main__":
         steps_completed=len(hist), steps_requested=args.steps,
         damper=args.damper, seed_km=args.seed_km, heat_flow=args.heatflow,
         reini_steps=args.reini_steps, reini_factor=args.reini_factor,
+        free_surface=args.free_surface,
+        cluster_x=args.cluster_x, cluster_y=args.cluster_y,
+        fs_bug=args.fs_bug,
         nx=args.nx, ny=args.ny, seconds=round(secs, 2),
         # Trust nothing below this line unless both of these are clean.
         level_set_range=ls_range,
         level_set_excursion=round(excursion, 5),
         volume_drift=round(volume_drift(m), 6),
+        topography_km=(None if not m["free_surface"] else
+                       [round(float(out["topography_km"].min()), 4),
+                        round(float(out["topography_km"].max()), 4)]),
         strain_in_seed=round(s_in, 4),
         strain_outside=round(s_out, 4),
         strain_max_initial=round(hist[0]["strain_max"], 3) if hist else None,

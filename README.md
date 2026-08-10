@@ -66,12 +66,21 @@ localisation, a free surface, and large finite strain.
 |---|---|---|
 | 09 | Visco-plasticity and shear bands: what localises, and what only looks like it | **about 3 min (measured)** |
 | 10 | A rift, and the point at which it stops being one | **13 min (measured)** |
+| 11 | A free surface: letting the rift subside, and two traps on the way | **25 min (measured)** |
 
 Planned, not yet built:
 
-* **T11** — resolving what T10 could not: adaptive refinement at the neck, and a free surface so the model can subside instead of importing rock through a flat lid
 * **T12** — rifting modes: narrow vs wide, set by crustal strength and geotherm
 * **T13** — orogenic wedges: critical taper and thrust sequences
+
+> **On adaptive refinement.** T11 was intended to cover mesh adaptivity as well.
+> It does not, and says so: `adapt` drives Mmg through PETSc, the Firedrake image's
+> PETSc is built without `--download-mmg` or `--download-parmmg`, `animate` is not
+> installed, and Mmg adapts simplex meshes only while this suite uses
+> quadrilaterals. Enabling it means rebuilding PETSc and Firedrake from source on
+> two architectures. A statically graded mesh was tried instead and made things
+> worse — abort at step 18 rather than 40, at twice the cost per step. The
+> measurements are in the notebook.
 
 **This turns out to be far cheaper than expected.** G-ADOPT already ships a
 kinematically-driven, visco-plastic lithospheric model — it is simply not
@@ -124,12 +133,12 @@ producing four hundred steps of nonsense.
 
 | Requirement | G-ADOPT capability | Status |
 |---|---|---|
-| Layered crust + mantle lithosphere | `conditional()` on depth, or level sets | available |
-| Temperature-dependent viscosity | `mu_lin = exp(-gamma_T*T + gamma_Z*d)`, harmonic with plastic | in `viscoplastic_case` |
-| Material advection through large strain | `LevelSetSolver`, `material_field`, `material_entrainment` | `multi_material` demos |
-| Evolving topography | `free_surface_equation`, incl. with multi-material | `free_surface` demos |
-| Plastic strain weakening | `GenericTransportSolver` to advect accumulated strain | machinery exists, **we write the source term** |
-| Refined shear zones | `animate` RiemannianMetric + `adapt`, re-adapting every N steps | `adaptive_base_case` |
+| Layered crust + mantle lithosphere | `conditional()` on depth, or level sets | **built, in T10** |
+| Temperature-dependent viscosity | dislocation creep on a prescribed geotherm | **built, in T10**; the geotherm does not yet evolve |
+| Material advection through large strain | `LevelSetSolver`, `material_field`, `material_entrainment` | **built, in T10** |
+| Evolving topography | `free_surface_equation`, incl. with multi-material | **built, in T11** |
+| Plastic strain weakening | `GenericTransportSolver` to advect accumulated strain | **built, in T10** |
+| Refined shear zones | `animate` RiemannianMetric + `adapt`, re-adapting every N steps | **not available in this container — see the note above** |
 
 So the work is assembly and geological judgement, not solver development. What we
 write ourselves is the scaffolding — layered crust and mantle lithosphere, a weak
