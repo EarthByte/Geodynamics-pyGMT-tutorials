@@ -59,15 +59,51 @@ dominates the cost and reinitialisation is nearly free beside it. At the old
 default the excursion grew roughly exponentially and the layering check failed
 by step 34.
 
-A secondary contributor, worth knowing about: the Picard iteration stalls at a
-relative residual of ~3e-4 and Newton fails at essentially every step, so the
-advecting velocity is not the exact Stokes solution and is not exactly
-divergence-free. Measured as ||div u|| / ||grad u||, the rift case gives 0.52 at
-64x32 against 0.09 for the well-converged instantaneous case in
-`gadopt_lithosphere_case.py` at the same resolution. Advection preserves the
-bounds of a level set only for a divergence-free field, so that excess feeds the
-drift too. Raising the Picard cap does not help -- the iteration genuinely
-stagnates, and `tools/rift_divergence_probe.py` measures both quantities.
+The solve path mattered more
+----------------------------
+The "stagnation" the Picard iteration appeared to suffer was three separate
+self-inflicted problems, all in `solve_stokes`; see the long comments there.
+Briefly: the best-iterate safeguard minimised the change between successive
+iterates, which is smallest at iteration 0 for reasons unrelated to accuracy and
+selected the least incompressible field available; a failed Newton solve left
+PETSc's diverged iterate in place; and the under-relaxation halved omega on any
+rise, so it hit its floor by iteration 6 and stayed there.
+
+At 64x32 over 40 steps, before and after:
+
+    Picard              30 its (the cap) at 1e-2   ->  15-21 its at 9e-5
+    Newton              failed every step          ->  succeeds most steps
+    ||div u||/||grad u||  0.52                     ->  0.11  (control: 0.09)
+    psi excursion       0.36                       ->  0.010
+    in-seed / outside strain  1.31 / 0.55          ->  1.31 / 0.10
+
+With those fixed the model localises: a symmetric conjugate pair dipping inward
+from ~45 km at x = 75 and 125 km, converging beneath the axis at ~30 km, steep
+faults through the brittle upper crust, and peak strain growing past the seeded
+maximum for the first time.
+
+How long a run is meaningful
+----------------------------
+Not as long as you would like, and the limit is the missing free surface rather
+than anything numerical.
+
+The mesh is Eulerian and fixed. Both walls are driven outward, the base is
+no-flux, so by incompressibility the material leaving through the sides must
+enter through the top: measured, the vertical velocity on the top boundary is
+0.999 in non-dimensional units -- the full boundary velocity, 0.25 cm/yr,
+directed downwards, essentially uniformly across the domain. The mass balance
+closes to 0.1% (200.0 out the sides against 199.8 in the top).
+
+That inflow is fictitious. A real rift subsides; this one imports rock from
+nowhere through a flat lid. One timestep at dt = 2e-3 is 0.08 Myr, so 200 m
+descends per step, and the 20 km upper crust is entirely replaced by imported
+material after **about 100 steps**. At 40 steps 8 km has come in -- 40% of the
+upper crust -- and the rift structure is still clean.
+
+So treat ~80 steps (6.4 Myr, 16 km of import) as the horizon for the current
+physics, and read anything past ~100 steps as a statement about the boundary
+condition. A free surface is not a refinement here; it is what the next order of
+magnitude in run length depends on.
 """
 
 import argparse
@@ -538,11 +574,18 @@ def run(m, steps, ls_tol=0.05, vol_tol=None, strict=True):
     # when one of the invariant checks below raises out of this loop.
     hist = m.setdefault("_hist", [])
     m.setdefault("v0", material_volumes(m))
+    # 30 was enough at 64x32, where Picard reaches 9e-5 in 15-21 iterations. At
+    # 96x48 it was still at 1.7e-4 after 30 -- close to the 1e-4 tolerance but
+    # not there, so it burned the full cap every step. A slightly larger budget
+    # costs nothing when the iteration converges early and buys convergence when
+    # it does not.
+    m.setdefault("picard_cap", 40)
     t0 = time.perf_counter()
     broke_at = None
     for n in range(steps):
-        pic, newton_ok, res = solve_stokes(m, picard_iters=120 if n == 0 else 30,
-                                           cold=(n == 0))
+        pic, newton_ok, res = solve_stokes(
+            m, picard_iters=4 * m["picard_cap"] if n == 0 else m["picard_cap"],
+            cold=(n == 0))
 
         # CFL-limit the timestep from the ACTUAL velocity, not a guess. A fixed
         # timestep is a resolution-dependent bug waiting to happen: halve the
@@ -612,6 +655,8 @@ if __name__ == "__main__":
                     help="seed half-width in km")
     ap.add_argument("--damper", type=float, default=1e21,
                     help="plastic damper viscosity, Pa s (cookbook: 1e21)")
+    ap.add_argument("--picard-iters", type=int, default=40,
+                    help="Picard iterations per step (the first step gets 4x)")
     ap.add_argument("--reini-steps", type=int, default=12,
                     help="level-set reinitialisation steps per timestep. The "
                          "old default of 2 let psi drift out of [0, 1]; see the "
@@ -637,6 +682,7 @@ if __name__ == "__main__":
               heat_flow=args.heatflow,
               reini_steps=args.reini_steps,
               reini_factor=args.reini_factor)
+    m["picard_cap"] = args.picard_iters
 
     layering = check_layering(m)
     for k, v in layering.items():

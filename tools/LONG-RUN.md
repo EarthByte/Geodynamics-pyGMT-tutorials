@@ -139,7 +139,42 @@ through the stress-free top. Measured drift is a steady ~0.8% per step from step
 0, and its constancy is what says it is flux rather than error. What to watch for
 is a *change in slope*.
 
+## How long a run is meaningful — read this before choosing `--steps`
+
+**About 80 steps, and the limit is the missing free surface.**
+
+The mesh is Eulerian and fixed. Both walls are driven outward, the base is
+no-flux, so by incompressibility whatever leaves through the sides must enter
+through the top. Measured on the 40-step output, the vertical velocity on the top
+boundary is **0.999** in non-dimensional units — the full boundary velocity,
+0.25 cm/yr, directed downwards, essentially uniform across the domain. Mass
+balance closes to 0.1%: 200.0 out the sides against 199.8 in the top.
+
+That inflow is fictitious. A real rift subsides; this one imports rock from
+nowhere through a flat lid.
+
+| | |
+|---|---|
+| time scale H/U₀ | 40.0 Myr |
+| one step at dt = 2×10⁻³ | 0.08 Myr |
+| descent through the top per step | 200 m |
+| steps to replace the whole 20 km upper crust | **~100** |
+| 40 steps | 3.2 Myr, 8 km imported (40% of the upper crust) |
+| 80 steps | 6.4 Myr, 16 km imported (80%) |
+
+The 400 steps in the previous version of this file would have been 32 Myr and
+80 km of imported material — four times the upper crust. That number was never
+justified; it was a guess, and it is wrong for a reason that has nothing to do
+with the bugs the run exposed.
+
+So: **80 steps**, and read anything past ~100 as a statement about the boundary
+condition rather than about rifting. A free surface is not a refinement here — it
+is what the next order of magnitude in run length depends on.
+
 ## The command
+
+Roughly 50–60 minutes at 96×48. Timed: 6 steps took 306 s including the 4×
+cold-start step, at about 1.1 s per Picard iteration.
 
 ```bash
 cd /Users/dietmar/Documents/GPlates/Geodynamics-pyGMT_tutorials
@@ -147,24 +182,21 @@ cd /Users/dietmar/Documents/GPlates/Geodynamics-pyGMT_tutorials
 docker run --rm -v $PWD:/work -w /work \
   ghcr.io/earthbyte/geodyn-pygmt:0.1.1 \
   python3 tools/gadopt_rift_case.py \
-    --nx 96 --ny 48 --steps 400 \
+    --nx 96 --ny 48 --steps 80 \
     --heatflow 0.055 --seed-km 10 --damper 1e21 \
-    --reini-steps 12 --ls-tol 0.05 \
+    --reini-steps 12 --picard-iters 40 --ls-tol 0.05 \
     --history rift_long_history.json \
     --out rift_long.npz 2>&1 | tee rift_long.log
 ```
 
-**Before committing to 400 steps, run 40 first.** It takes about 12 minutes at
-64×32 and tells you whether the invariants hold. If step 40 comes back with an
-excursion under about 0.01 and no `**` lines, the long run is worth starting.
+`--picard-iters 40`, up from 30: at 64×32 Picard reaches 9×10⁻⁵ in 15–21
+iterations, but at 96×48 it was still at 1.7×10⁻⁴ after 30 — just short of the
+10⁻⁴ tolerance, so it burned the whole cap every step. The extra budget costs
+nothing when it converges early.
 
-```bash
-docker run --rm -v $PWD:/work -w /work \
-  ghcr.io/earthbyte/geodyn-pygmt:0.1.1 \
-  python3 tools/gadopt_rift_case.py \
-    --nx 64 --ny 32 --steps 40 --heatflow 0.055 --seed-km 10 \
-    --reini-steps 12 --out /tmp/probe.npz
-```
+The invariants abort the run if they break, so if it is still going, it is still
+meaningful. Watch `psi [...]` in the step lines: at 96×48 it was 1.0012 by step 6
+and growing very slowly, better than 64×32 as expected.
 
 Plot with:
 
