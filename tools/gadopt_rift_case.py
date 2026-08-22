@@ -131,17 +131,52 @@ from geodynkit import lithosphere as LI  # noqa: E402
 # --- scales -------------------------------------------------------------
 H = 100e3                       # domain depth, m
 YEAR = 86400 * 365.25
-U0 = 0.25e-2 / YEAR             # 0.25 cm/yr, the cookbook extension rate
 MU0 = 1e22                      # reference viscosity, Pa s
+RATE_CM_YR = 0.25               # half-rate on each wall; the cookbook value
+U0 = RATE_CM_YR * 1e-2 / YEAR
 STRESS = MU0 * U0 / H           # stress scale, Pa
 SR = U0 / H                     # strain-rate scale, 1/s
 T_SCALE = H / U0                # time scale, s
 
 
+def set_rate(cm_per_year):
+    """Change the extension rate, and every scale that depends on it.
+
+    U0 is the velocity scale, so it is not a free knob -- it sets the stress
+    scale, the strain-rate scale, the time scale, the buoyancy group and the
+    Peclet number all at once, and every one of those changes for a physical
+    reason:
+
+      * `STRESS = mu0 U0 / H` rises, so the non-dimensional yield stress
+        `sigma_y / STRESS` FALLS: faster extension yields more easily.
+      * `SR = U0 / H` rises, so the dimensional strain rate in the creep law
+        rises and the dislocation-creep viscosity falls with it (n ~ 3-4).
+      * `kappa / (U0 H)` falls, so the Peclet number rises: less time for
+        conduction to erase the thermal anomaly that advection creates.
+      * `g H^2 / (mu0 U0)` falls, so buoyancy matters less relative to the
+        driving stress.
+
+    The first two say a faster rift should localise more readily, the third
+    that it should weaken thermally more readily, and the fourth that the free
+    surface should matter less. They do not have to agree, which is why the
+    experiment is worth running rather than arguing about.
+
+    Module globals rather than parameters because `build()` reads them at call
+    time; set the rate before building.
+    """
+    global RATE_CM_YR, U0, STRESS, SR, T_SCALE
+    RATE_CM_YR = float(cm_per_year)
+    U0 = RATE_CM_YR * 1e-2 / YEAR
+    STRESS = MU0 * U0 / H
+    SR = U0 / H
+    T_SCALE = H / U0
+
+
 def build(nx, ny, aspect=2.0, damper=1e21, seed_halfwidth_km=25.0,
-          heat_flow=0.055, reini_steps=12, reini_factor=0.5,
+          reini_steps=12, reini_factor=0.5,
           free_surface=False, cluster_x=0.0, cluster_y=0.0,
-          fs_bug="none"):
+          fs_bug="none", thermal=False, crust_km=40.0, t_base=1613.0,
+          seed_mode="centre", seed_amp=1.0, dt_max=2e-3):
     """Assemble mesh, fields, rheology and solvers. Returns a dict of handles."""
     mesh = RectangleMesh(nx, ny, aspect, 1.0, quadrilateral=True)
 
@@ -219,8 +254,16 @@ def build(nx, ny, aspect=2.0, damper=1e21, seed_halfwidth_km=25.0,
     # ---- three materials from two level sets ---------------------------
     # psi_uc: 1 above the upper/lower-crust interface (20 km depth)
     # psi_lc: 1 above the crust/mantle interface       (40 km depth)
-    y_uc = 1.0 - 20e3 / H
-    y_lc = 1.0 - 40e3 / H
+    # CRUSTAL THICKNESS is the experiment's control variable, and the basal
+    # temperature is deliberately NOT. Pinning T at the base of the column to the
+    # mantle adiabat and letting the surface heat flow follow keeps every case on
+    # the same planet; specifying q0 instead lets the mantle potential
+    # temperature drift from 1060 to 1940 C across a sweep, which is not a
+    # geotherm experiment.
+    column = LI.scaled_column(crust_km)
+    heat_flow = LI.heat_flow_for_base_temperature(t_base, column)
+    y_uc = 1.0 - (crust_km / 2.0) * 1e3 / H
+    y_lc = 1.0 - crust_km * 1e3 / H
 
     psi_uc, psi_lc = Function(K, name="psi_uc"), Function(K, name="psi_lc")
     epsilon = interface_thickness(K, min_cell_edge_length=True)
@@ -234,7 +277,7 @@ def build(nx, ny, aspect=2.0, damper=1e21, seed_halfwidth_km=25.0,
     # shallowest. Listing psi_uc first instead makes the outermost conditional
     # "upper-crust value wherever depth < 40 km", which silently swallows the
     # lower crust — a wrong model that runs perfectly happily.
-    layers = [LI.MANTLE_LITHOSPHERE, LI.LOWER_CRUST, LI.UPPER_CRUST]
+    layers = [column[2], column[1], column[0]]   # deepest first
     ls = [psi_lc, psi_uc]           # deepest interface first
 
     def mat(attr, how="arithmetic"):
@@ -245,16 +288,45 @@ def build(nx, ny, aspect=2.0, damper=1e21, seed_halfwidth_km=25.0,
     coh = mat("cohesion")
     fric = mat("friction_deg")
 
-    # ---- prescribed conductive geotherm --------------------------------
-    # Temperature is held fixed here. Coupling EnergySolver in is the next
-    # step; keeping T frozen isolates the mechanics so the level-set and
-    # strain-weakening machinery can be verified on its own.
+    # ---- geotherm ------------------------------------------------------
+    # Initialised from the analytic steady conductive profile in either case.
+    # With `thermal=False` it stays there for the whole run; with `thermal=True`
+    # an EnergySolver advects and diffuses it, and the crust generates its own
+    # heat.
     zc = np.linspace(0.0, H / 1e3, 400)
-    Tc = np.atleast_1d(LI.geotherm(zc, surface_heat_flow=heat_flow))
+    Tc = np.atleast_1d(LI.geotherm(zc, column=column,
+                                   surface_heat_flow=heat_flow))
     Tfield = Function(Q, name="Temperature")
     Tfield.interpolate(Constant(0.0))
     Tfield.dat.data[:] = np.interp(
         (1.0 - Function(Q).interpolate(X[1]).dat.data_ro) * H / 1e3, zc, Tc)
+    T_surface, T_base = float(Tc[0]), float(Tc[-1])
+
+    # THERMAL SCALING.
+    #
+    # Temperature stays in kelvin; only length, velocity and time are scaled.
+    # The energy equation
+    #     dT/dt + u.grad T = kappa lap T + A / (rho cp)
+    # then non-dimensionalises with lengths H and velocity U0 to give a
+    # diffusivity kappa * / (U0 H) -- an inverse Peclet number -- and a source
+    # (A / (rho cp)) * (H / U0), in kelvin per unit non-dimensional time.
+    #
+    #   kappa = k / (rho cp) = 2.5 / (3300 * 1000) = 7.6e-7 m2/s
+    #   kappa' = 7.6e-7 / (7.92e-11 * 1e5) = 0.096,  so Pe = 10.4
+    #
+    # Advection and diffusion are within an order of magnitude of each other,
+    # which is the physically interesting regime and the reason a prescribed
+    # geotherm is a real approximation rather than a harmless one.
+    #
+    # Conductivity and heat capacity are taken uniform (k = 2.5 W/m/K,
+    # cp = 1000 J/kg/K, rho_ref); only the radiogenic production is layered,
+    # since that is what actually differs between crust and mantle here.
+    CP = 1000.0
+    kappa_dim = 2.5 / (rho_ref_buoy * CP)
+    KAPPA_ND = kappa_dim / (U0 * H)
+    heat_nd = material_field(
+        ls, [l.heat_production / (rho_ref_buoy * CP) * (H / U0) for l in layers],
+        interface="arithmetic")
 
     # ---- plastic strain, advected with a source ------------------------
     strain = Function(Q, name="PlasticStrain")
@@ -268,9 +340,39 @@ def build(nx, ny, aspect=2.0, damper=1e21, seed_halfwidth_km=25.0,
     # it is a weak province occupying a quarter of the model — and a province
     # cannot localise, because there is no gradient for strain to concentrate
     # into. A real seed is a few km across.
-    sw = seed_halfwidth_km * 1e3 / H
-    seed = ((np.abs(xc - aspect / 2) < sw) & (yc > y_lc))
-    strain.dat.data[seed] = rng.uniform(0.5, 1.5, seed.sum())
+    # SEEDING, and why the mode matters for a narrow-versus-wide experiment.
+    #
+    # `centre` puts a weak patch at the middle of the domain with strain already
+    # at or past the weakening onset of 0.5. That is right for asking *how* a
+    # rift localises once it has a nucleation site, which is T10's question.
+    #
+    # It is wrong for asking *whether* it localises to one site, which is T12's.
+    # A wide rift is precisely the regime in which no single location dominates,
+    # and a central weak patch guarantees that one does. The first sweep with
+    # this seeding produced four narrow rifts at every crustal thickness from 20
+    # to 50 km, with the deformation never reaching the side walls -- the answer
+    # was imposed by the initial condition.
+    #
+    # `random` instead spreads low-amplitude noise through the whole crust. The
+    # amplitude is deliberately below the weakening onset, so nothing starts
+    # pre-weakened: the noise only breaks the translational symmetry, and any
+    # localisation that appears has to be earned.
+    if seed_mode == "random":
+        # AMPLITUDE MATTERS MORE THAN IT LOOKS. The weakening law does nothing
+        # below a plastic strain of 0.5, so noise capped under that threshold
+        # leaves the feedback loop switched off: a first attempt with
+        # uniform(0, 0.3) never localised at any crustal thickness, reaching a
+        # peak strain of only 0.37 after 40 steps with W50 stuck near the
+        # uniform value of 0.43. The noise has to STRADDLE the onset, so that
+        # some material is already weakening and can compete to capture the
+        # deformation. uniform(0, 1) puts about half the crust past it, which is
+        # what ASPECT's continental_extension cookbook does.
+        crust = yc > y_lc
+        strain.dat.data[crust] = rng.uniform(0.0, seed_amp, crust.sum())
+    else:
+        sw = seed_halfwidth_km * 1e3 / H
+        seed = ((np.abs(xc - aspect / 2) < sw) & (yc > y_lc))
+        strain.dat.data[seed] = rng.uniform(0.5, 1.5, seed.sum())
 
     # ---- rheology ------------------------------------------------------
     # Visco-plastic Stokes does not converge under Newton from a cold start —
@@ -346,7 +448,7 @@ def build(nx, ny, aspect=2.0, damper=1e21, seed_halfwidth_km=25.0,
     mu, mu_creep, mu_plast, epsii = rheology(u_, p_)
 
     # ---- solvers -------------------------------------------------------
-    dt = Constant(2e-3)
+    dt = Constant(dt_max)
     bcs = {boundary.left: {"ux": -1}, boundary.right: {"ux": 1},
            boundary.bottom: {"uy": 0}}          # top is stress-free
 
@@ -404,6 +506,21 @@ def build(nx, ny, aspect=2.0, damper=1e21, seed_halfwidth_km=25.0,
                                 reini_kwargs=reini)
                  for psi in ls]
 
+    # Energy: advection + diffusion + radiogenic heating, with the temperature
+    # pinned at both ends. The basal value is the analytic geotherm's own base,
+    # so with u = 0 the initial condition is already the steady state and the
+    # field should not move -- which is the verification test in `check_thermal`.
+    energy = None
+    if thermal:
+        thermal_approx = BoussinesqApproximation(
+            0, rho=1.0, kappa=KAPPA_ND, H=heat_nd)
+        energy = EnergySolver(
+            Tfield, u_fn, thermal_approx, dt, DIRK33,
+            bcs={boundary.top: {"T": T_surface},
+                 boundary.bottom: {"T": T_base}},
+            su_advection=True,
+        )
+
     # Plastic strain: advected, with a source equal to the plastic strain rate
     # where the plastic branch governs. This is the feedback that makes a fault
     # keep slipping once it has formed.
@@ -423,7 +540,11 @@ def build(nx, ny, aspect=2.0, damper=1e21, seed_halfwidth_km=25.0,
                 # CFL limiter would be using a timestep several times too large
                 # for the smallest cells while reporting a comfortable Courant
                 # number.
-                fs_bug=fs_bug,
+                fs_bug=fs_bug, thermal=thermal, energy=energy,
+                heat_flow=heat_flow, crust_km=crust_km, column=column,
+                dt_max=dt_max,
+                strain_initial=Function(Q).assign(strain),
+                Tfield=Tfield, T_surface=T_surface, T_base=T_base,
                 h_min=float(np.diff(np.unique(np.round(
                     mesh.coordinates.dat.data[:, 0], 9))).min()),
                 free_surface=free_surface,
@@ -445,9 +566,11 @@ def check_layering(m):
     rho = rho_fn.dat.data_ro
 
     out = {}
-    for label, lo, hi, expect in (("upper crust", 2, 18, 2700.0),
-                                  ("lower crust", 22, 38, 2900.0),
-                                  ("mantle lithosphere", 45, 95, 3300.0)):
+    ck = m["crust_km"]
+    for label, lo, hi, expect in (
+            ("upper crust", 0.1 * ck, 0.4 * ck, 2700.0),
+            ("lower crust", 0.6 * ck, 0.9 * ck, 2900.0),
+            ("mantle lithosphere", ck + 5, 95.0, 3300.0)):
         sel = (depth_km > lo) & (depth_km < hi)
         got = float(rho[sel].mean())
         out[label] = dict(expected=expect, got=round(got, 1),
@@ -742,11 +865,13 @@ def run(m, steps, ls_tol=0.05, vol_tol=None, strict=True):
         # mesh and the Courant number doubles.
         umax = max(float(np.abs(m["u"].dat.data_ro).max()), 1e-12)
         dt_cfl = 0.4 * m["h_min"] / umax
-        m["dt"].assign(min(2e-3, dt_cfl))
+        m["dt"].assign(min(m["dt_max"], dt_cfl))
 
         for s in m["ls_solver"]:
             s.solve()
         m["strain_solver"].solve()
+        if m.get("energy") is not None:
+            m["energy"].solve()
 
         lsr = level_set_range(m)
         lo = min(r[0] for r in lsr)
@@ -799,12 +924,38 @@ if __name__ == "__main__":
     ap.add_argument("--ny", type=int, default=48)
     ap.add_argument("--steps", type=int, default=10)
     ap.add_argument("--out", default="/tmp/rift.npz")
-    ap.add_argument("--heatflow", type=float, default=0.055,
-                    help="surface heat flow W/m2; low = cold, strong, coupled crust")
+    ap.add_argument("--dt-max", type=float, default=2e-3,
+                    help="cap on the non-dimensional timestep. THIS, not the "
+                         "extension rate, is what buys finite strain: total "
+                         "stretching is steps * dt, and the rate cancels out of "
+                         "the non-dimensionalisation entirely. CFL usually "
+                         "permits several times the historical 2e-3 cap")
+    ap.add_argument("--rate-cm-yr", type=float, default=0.25,
+                    help="half-rate on each wall in cm/yr; rescales stress, "
+                         "strain rate, time, buoyancy and Peclet together")
+    ap.add_argument("--seed-amp", type=float, default=1.0,
+                    help="upper bound of the random initial plastic strain. "
+                         "Must straddle the weakening onset of 0.5 or nothing "
+                         "localises")
+    ap.add_argument("--seed-mode", choices=["centre", "random"], default="centre",
+                    help="centre: one weak patch at the axis (T10). random: "
+                         "low-amplitude noise through the crust, so localisation "
+                         "has to be earned (T12)")
+    ap.add_argument("--crust-km", type=float, default=40.0,
+                    help="total crustal thickness; thin = cold Moho and a "
+                         "coupled, strong column, thick = hot Moho and a weak "
+                         "lower crust. The surface heat flow follows from this "
+                         "and --t-base rather than being set independently")
+    ap.add_argument("--t-base", type=float, default=1613.0,
+                    help="temperature at the base of the column, K (the mantle "
+                         "adiabat). Held fixed across a sweep")
     ap.add_argument("--seed-km", type=float, default=25.0,
                     help="seed half-width in km")
     ap.add_argument("--damper", type=float, default=1e21,
                     help="plastic damper viscosity, Pa s (cookbook: 1e21)")
+    ap.add_argument("--thermal", action="store_true",
+                    help="solve the energy equation instead of holding the "
+                         "geotherm fixed")
     ap.add_argument("--fs-bug", choices=["none", "time-level", "lithostatic"],
                     default="none",
                     help="reintroduce a free-surface bug on purpose, for teaching")
@@ -838,14 +989,18 @@ if __name__ == "__main__":
                     help="write the per-step record to this JSON file")
     args = ap.parse_args()
 
+    set_rate(args.rate_cm_yr)          # before build(): it reads the scales
+
     m = build(args.nx, args.ny, damper=args.damper,
               seed_halfwidth_km=args.seed_km,
-              heat_flow=args.heatflow,
+              crust_km=args.crust_km, t_base=args.t_base,
+              seed_mode=args.seed_mode, seed_amp=args.seed_amp,
+              dt_max=args.dt_max,
               reini_steps=args.reini_steps,
               reini_factor=args.reini_factor,
               free_surface=args.free_surface,
               cluster_x=args.cluster_x, cluster_y=args.cluster_y,
-              fs_bug=args.fs_bug)
+              fs_bug=args.fs_bug, thermal=args.thermal)
     m["picard_cap"] = args.picard_iters
 
     layering = check_layering(m)
@@ -912,7 +1067,14 @@ if __name__ == "__main__":
         strain_rate=grid(m["epsii"], positive=True) * SR,
         density=grid(m["rho"], positive=True),
         weakening=grid(m["w"], positive=True),
+        temperature=grid(m["Tfield"]),
     )
+    # The seed is the initial condition, so W50 needs the initial strain on the
+    # same grid to difference against. Recomputed here from the stored copy.
+    m["strain_initial_grid"] = np.asarray(
+        ev.evaluate(Function(P1).interpolate(m["strain_initial"]))
+    ).reshape(nys, nxs)[::-1]
+
     uu = np.asarray(ev.evaluate(m["u"])).reshape(nys, nxs, 2)[::-1]
     out["vx"], out["vz"] = uu[..., 0], -uu[..., 1]
 
@@ -943,6 +1105,34 @@ if __name__ == "__main__":
     out_sel = (~np.broadcast_to(inseed, st.shape)) & np.broadcast_to(crust, st.shape)
     s_in, s_out = float(st[sel].mean()), float(st[out_sel].mean())
 
+    # W50 -- the fraction of the domain width carrying half the NEW strain.
+    #
+    # Narrow versus wide is a statement about the WIDTH of the deforming zone,
+    # so the metric has to measure a distribution rather than an amount. Take
+    # the column-integrated increment in plastic strain, normalise it to a
+    # probability, sort descending, and ask what fraction of the domain is
+    # needed to reach half the total.
+    #
+    #   all deformation in one column   ->  W50 -> 0      (narrow)
+    #   deformation spread uniformly    ->  W50 = 0.5     (wide)
+    #
+    # Two properties earn it a place after three metrics that misled here. It is
+    # computed on the INCREMENT, so it reports where deformation happened during
+    # the run rather than where the seed was placed. And a run in which nothing
+    # deforms cannot score as narrow -- a flat field is maximally spread and
+    # gives 0.5, while an exactly zero field returns None rather than a number.
+    # Absolute strain is reported beside it, because a distribution says nothing
+    # about magnitude.
+    def w50(field):
+        col = np.maximum(field, 0.0).sum(axis=0)
+        tot = col.sum()
+        if tot <= 0:
+            return None
+        p = np.sort(col / tot)[::-1]
+        return round(float((np.searchsorted(np.cumsum(p), 0.5) + 1) / p.size), 4)
+
+    increment = out["strain"] - m["strain_initial_grid"]
+
     excursion = max(max(-lo for lo, _ in ls_range),
                     max(hi - 1.0 for _, hi in ls_range), 0.0)
 
@@ -954,11 +1144,16 @@ if __name__ == "__main__":
     print("RESULT " + json.dumps(dict(
         failure=failure,
         steps_completed=len(hist), steps_requested=args.steps,
-        damper=args.damper, seed_km=args.seed_km, heat_flow=args.heatflow,
+        damper=args.damper, seed_km=args.seed_km,
+        crust_km=args.crust_km, t_base=args.t_base,
+        seed_mode=args.seed_mode, seed_amp=args.seed_amp,
+        rate_cm_yr=RATE_CM_YR, dt_max=args.dt_max,
+        stretch_percent=round(100 * args.steps * args.dt_max * 2.0 / 2.0, 2),
+        surface_heat_flow=round(float(m["heat_flow"]), 5),
         reini_steps=args.reini_steps, reini_factor=args.reini_factor,
         free_surface=args.free_surface,
         cluster_x=args.cluster_x, cluster_y=args.cluster_y,
-        fs_bug=args.fs_bug,
+        fs_bug=args.fs_bug, thermal=args.thermal,
         nx=args.nx, ny=args.ny, seconds=round(secs, 2),
         # Trust nothing below this line unless both of these are clean.
         level_set_range=ls_range,
@@ -967,6 +1162,9 @@ if __name__ == "__main__":
         topography_km=(None if not m["free_surface"] else
                        [round(float(out["topography_km"].min()), 4),
                         round(float(out["topography_km"].max()), 4)]),
+        w50=w50(increment),
+        w50_all=w50(out["strain"]),
+        strain_increment_total=round(float(np.maximum(increment, 0).sum()), 1),
         strain_in_seed=round(s_in, 4),
         strain_outside=round(s_out, 4),
         strain_max_initial=round(hist[0]["strain_max"], 3) if hist else None,

@@ -37,7 +37,8 @@ import numpy as np
 __all__ = [
     "Layer", "UPPER_CRUST", "LOWER_CRUST", "MANTLE_LITHOSPHERE", "ASTHENOSPHERE",
     "DEFAULT_COLUMN", "R_GAS",
-    "geotherm", "dislocation_creep_viscosity", "drucker_prager_yield_stress",
+    "geotherm", "heat_flow_for_base_temperature", "scaled_column",
+    "dislocation_creep_viscosity", "drucker_prager_yield_stress",
     "strain_weakening_factor", "effective_viscosity", "strength_envelope",
 ]
 
@@ -142,6 +143,44 @@ def geotherm(depth_km, column=DEFAULT_COLUMN, surface_T=273.0,
         T[i] = (T_top[k] + q_top[k] * dz / lay.conductivity
                 - lay.heat_production * dz**2 / (2 * lay.conductivity))
     return T if T.size > 1 else float(T[0])
+
+
+def heat_flow_for_base_temperature(T_base, column=DEFAULT_COLUMN,
+                                   surface_T=273.0):
+    """Surface heat flow that puts ``T_base`` at the bottom of ``column``.
+
+    Specifying a surface heat flow and reading off whatever basal temperature
+    results is backwards for a comparative experiment: it lets the mantle
+    potential temperature drift between cases, so a "geotherm sweep" quietly
+    becomes a sweep over different planets. Pin the base -- it is the mantle
+    adiabat, around 1600 K -- and let the surface flux be whatever the column
+    requires.
+
+    The steady conductive geotherm is affine in the surface flux, so this is
+    exact rather than iterative: evaluate the profile at q0 = 0 and q0 = 1 and
+    invert.
+    """
+    depth = sum(l.thickness_km for l in column)
+    a = float(np.atleast_1d(geotherm(depth, column, surface_T, 0.0))[0])
+    b = float(np.atleast_1d(geotherm(depth, column, surface_T, 1.0))[0]) - a
+    return (T_base - a) / b
+
+
+def scaled_column(crust_km, mantle_km=None, column=DEFAULT_COLUMN):
+    """The default column with the crust rescaled to ``crust_km`` in total.
+
+    Upper and lower crust keep their 1:1 ratio; the mantle lithosphere takes up
+    the slack so the column depth stays at 100 km, which is what the fixed
+    domain requires.
+    """
+    from dataclasses import replace
+    uc, lc, ml = column
+    half = crust_km / 2.0
+    total = sum(l.thickness_km for l in column)
+    mantle = mantle_km if mantle_km is not None else total - crust_km
+    return (replace(uc, thickness_km=half),
+            replace(lc, thickness_km=half),
+            replace(ml, thickness_km=mantle))
 
 
 def lithostatic_pressure(depth_km, column=DEFAULT_COLUMN, g=9.81):

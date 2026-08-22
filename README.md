@@ -67,11 +67,21 @@ localisation, a free surface, and large finite strain.
 | 09 | Visco-plasticity and shear bands: what localises, and what only looks like it | **about 3 min (measured)** |
 | 10 | A rift, and the point at which it stops being one | **13 min (measured)** |
 | 11 | A free surface: letting the rift subside, and two traps on the way | **25 min (measured)** |
+| 12 | What you seed is what you get: mode selection, and three things that do not help | **11 min (measured)** |
 
 Planned, not yet built:
 
-* **T12** — rifting modes: narrow vs wide, set by crustal strength and geotherm
 * **T13** — orogenic wedges: critical taper and thrust sequences
+
+> **On narrow versus wide rifting.** T12 set out to reproduce Buck's (1991) mode
+> diagram and does not, which is the notebook's subject rather than a gap in it.
+> Four attempts failed, each informatively: a centred seed produces a narrow rift
+> at *every* crustal thickness because it imposes a nucleation site; distributed
+> noise below the weakening onset of 0.5 switches the feedback loop off entirely;
+> raising the extension rate cannot buy finite strain because U₀ cancels out of
+> the non-dimensionalisation; and pushing the timestep to reach 30% stretching
+> hits the level-set representational ceiling at 15–25%. The measurements are in
+> the notebook.
 
 > **On adaptive refinement.** T11 was intended to cover mesh adaptivity as well.
 > It does not, and says so: `adapt` drives Mmg through PETSc, the Firedrake image's
