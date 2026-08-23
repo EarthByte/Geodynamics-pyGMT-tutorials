@@ -8,6 +8,12 @@ the container image tags on `ghcr.io/earthbyte/geodyn-pygmt`.
 
 ### Added
 
+- **T13 — The other sign: mountains, and why extension is the harder
+  direction.** `--mode shortening` completes 40 steps to 16% strain and builds a
+  doubly-vergent pop-up with +27 km of surface uplift; the matched extension run
+  trips the level-set invariant at step 23 and 9.2%. The asymmetry is geometric:
+  extension thins layers towards the representational limit, shortening thickens
+  them away from it. 9 min at 48x24.
 - **T12 — What you seed is what you get: mode selection.** Set out to reproduce
   Buck's (1991) narrow/wide diagram and does not; the four failed attempts are
   the notebook. 11 min at 48x24.
@@ -105,6 +111,11 @@ the container image tags on `ghcr.io/earthbyte/geodyn-pygmt`.
   stretching hits the level-set representational ceiling at 15-25%. Reaching the
   transition needs finer cells, several hundred steps and probably a wider
   domain — a research run, not a notebook cell.
+- **Critical taper**, in the sense of Davis, Suppe & Dahlen. Symmetric
+  convergence with a central seed gives a bivergent pop-up, which is a different
+  structure. A taper needs a basal decollement, a backstop and a one-sided feed —
+  a change of geometry rather than of physics, and all three are expressible in
+  what the driver already does. T13 section 4 sets it out.
 
 ## 0.1.1 — 6 August 2026
 

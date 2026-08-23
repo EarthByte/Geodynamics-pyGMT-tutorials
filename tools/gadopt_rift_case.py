@@ -176,7 +176,8 @@ def build(nx, ny, aspect=2.0, damper=1e21, seed_halfwidth_km=25.0,
           reini_steps=12, reini_factor=0.5,
           free_surface=False, cluster_x=0.0, cluster_y=0.0,
           fs_bug="none", thermal=False, crust_km=40.0, t_base=1613.0,
-          seed_mode="centre", seed_amp=1.0, dt_max=2e-3):
+          seed_mode="centre", seed_amp=1.0, dt_max=2e-3,
+          mode="extension"):
     """Assemble mesh, fields, rheology and solvers. Returns a dict of handles."""
     mesh = RectangleMesh(nx, ny, aspect, 1.0, quadrilateral=True)
 
@@ -449,7 +450,13 @@ def build(nx, ny, aspect=2.0, damper=1e21, seed_halfwidth_km=25.0,
 
     # ---- solvers -------------------------------------------------------
     dt = Constant(dt_max)
-    bcs = {boundary.left: {"ux": -1}, boundary.right: {"ux": 1},
+    # ONE SIGN separates the two experiments, exactly as in T09's instantaneous
+    # benchmark -- but now with everything T10 and T11 added behind it. Driven
+    # outward the model rifts and the surface subsides into a basin; driven
+    # inward it shortens and the surface has to rise, because the material
+    # pushed in through the walls has nowhere else to go.
+    sgn = -1.0 if mode == "extension" else 1.0
+    bcs = {boundary.left: {"ux": sgn * 1}, boundary.right: {"ux": -sgn * 1},
            boundary.bottom: {"uy": 0}}          # top is stress-free
 
     # BUOYANCY, and why it only appears with the free surface.
@@ -924,6 +931,10 @@ if __name__ == "__main__":
     ap.add_argument("--ny", type=int, default=48)
     ap.add_argument("--steps", type=int, default=10)
     ap.add_argument("--out", default="/tmp/rift.npz")
+    ap.add_argument("--mode", choices=["extension", "shortening"],
+                    default="extension",
+                    help="drive the walls apart (a rift) or together (an "
+                         "orogenic wedge). The only difference is a sign")
     ap.add_argument("--dt-max", type=float, default=2e-3,
                     help="cap on the non-dimensional timestep. THIS, not the "
                          "extension rate, is what buys finite strain: total "
@@ -995,7 +1006,7 @@ if __name__ == "__main__":
               seed_halfwidth_km=args.seed_km,
               crust_km=args.crust_km, t_base=args.t_base,
               seed_mode=args.seed_mode, seed_amp=args.seed_amp,
-              dt_max=args.dt_max,
+              dt_max=args.dt_max, mode=args.mode,
               reini_steps=args.reini_steps,
               reini_factor=args.reini_factor,
               free_surface=args.free_surface,
@@ -1147,7 +1158,7 @@ if __name__ == "__main__":
         damper=args.damper, seed_km=args.seed_km,
         crust_km=args.crust_km, t_base=args.t_base,
         seed_mode=args.seed_mode, seed_amp=args.seed_amp,
-        rate_cm_yr=RATE_CM_YR, dt_max=args.dt_max,
+        mode=args.mode, rate_cm_yr=RATE_CM_YR, dt_max=args.dt_max,
         stretch_percent=round(100 * args.steps * args.dt_max * 2.0 / 2.0, 2),
         surface_heat_flow=round(float(m["heat_flow"]), 5),
         reini_steps=args.reini_steps, reini_factor=args.reini_factor,

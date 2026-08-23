@@ -68,10 +68,17 @@ localisation, a free surface, and large finite strain.
 | 10 | A rift, and the point at which it stops being one | **13 min (measured)** |
 | 11 | A free surface: letting the rift subside, and two traps on the way | **25 min (measured)** |
 | 12 | What you seed is what you get: mode selection, and three things that do not help | **11 min (measured)** |
+| 13 | The other sign: mountains, and why extension is the harder direction | **9 min (measured)** |
 
-Planned, not yet built:
+Part 3 is complete. A lithospheric deformation model with advected layered
+materials, accumulated plastic strain, strain weakening, a solved geotherm and a
+deformable surface, in **both** extension and shortening, with invariants that
+stop it when the material description stops meaning anything.
 
-* **T13** — orogenic wedges: critical taper and thrust sequences
+The honest edge of the suite is the **level-set representational ceiling at
+15–25% strain on a 2 km mesh**, and it is what blocks both of Part 3's unreached
+targets — rifting modes (T12) and critical taper (T13). That is a resolution
+problem, not a physics one.
 
 > **On narrow versus wide rifting.** T12 set out to reproduce Buck's (1991) mode
 > diagram and does not, which is the notebook's subject rather than a gap in it.
