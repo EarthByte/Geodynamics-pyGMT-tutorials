@@ -4,7 +4,7 @@ Notable changes to the suite. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); version numbers track
 the container image tags on `ghcr.io/earthbyte/geodyn-pygmt`.
 
-## Unreleased
+## 0.1.2 — 23 August 2026
 
 ### Added
 
@@ -60,6 +60,14 @@ the container image tags on `ghcr.io/earthbyte/geodyn-pygmt`.
 - `tools/rift_divergence_probe.py` and `tools/rift_picard_probe.py` — measure
   ‖∇·u‖/‖∇u‖ and compare Picard relaxation strategies.
 - `tools/plot_rift.py`, `tools/LONG-RUN.md`, `CLAUDE.md`, this file.
+
+### Fixed (release blocker)
+
+- **`.binder/Dockerfile` still pinned `:0.1.0`.** It was never bumped when 0.1.1
+  shipped, so BinderHub kept building from the image that lacked
+  `jupyterhub-singleuser` — the exact thing 0.1.1 existed to fix. Publishing a
+  corrected image is not enough if the Binder entry point still names the broken
+  one. This is almost certainly why the Nectar launch was never seen to work.
 
 ### Changed
 

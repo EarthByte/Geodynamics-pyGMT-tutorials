@@ -180,7 +180,7 @@ cold-start step, at about 1.1 s per Picard iteration.
 cd /Users/dietmar/Documents/GPlates/Geodynamics-pyGMT_tutorials
 
 docker run --rm -v $PWD:/work -w /work \
-  ghcr.io/earthbyte/geodyn-pygmt:0.1.1 \
+  ghcr.io/earthbyte/geodyn-pygmt:0.1.2 \
   python3 tools/gadopt_rift_case.py \
     --nx 96 --ny 48 --steps 80 \
     --heatflow 0.055 --seed-km 10 --damper 1e21 \
@@ -202,7 +202,7 @@ Plot with:
 
 ```bash
 docker run --rm -v $PWD:/work -w /work \
-  ghcr.io/earthbyte/geodyn-pygmt:0.1.1 \
+  ghcr.io/earthbyte/geodyn-pygmt:0.1.2 \
   python3 tools/plot_rift.py rift_long.npz --prefix rift_long
 ```
 

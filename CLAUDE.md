@@ -27,7 +27,7 @@ python3 tools/build_notebooks.py T09 T10    # note the T prefix
 python3 tools/check_manifest.py             # README table vs Notebooks/ on disk
 python3 -m pytest tests/ -q                 # 19 tests, ~80 s, no container
 
-docker run --rm -v $PWD:/work -w /work ghcr.io/earthbyte/geodyn-pygmt:0.1.1 <cmd>
+docker run --rm -v $PWD:/work -w /work ghcr.io/earthbyte/geodyn-pygmt:0.1.2 <cmd>
 ```
 
 `build_notebooks.py` executes with `Notebooks/` as the working directory, which

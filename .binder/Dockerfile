@@ -3,8 +3,12 @@
 # never triggers an image rebuild. (Pattern borrowed from
 # underworldcode/uw3-binder-launcher.)
 #
-# The base image already sets USER, HOME and WORKDIR, and exports NB_USER as an
-# ENV so it is visible here. Referencing an ARG from the parent image instead
-# yields an empty string and a build warning:
-#   UndefinedVar: Usage of undefined variable '$NB_USER'
-FROM ghcr.io/earthbyte/geodyn-pygmt:0.1.1
+# BUMP THIS WITH EVERY IMAGE RELEASE. It was left at 0.1.0 through the whole of
+# 0.1.1, which means Binder kept building from the image that lacked
+# `jupyterhub-singleuser` -- the very thing 0.1.1 was released to fix. The
+# published image being correct is not enough if this line still points at the
+# broken one, and that is almost certainly why the Nectar retest never worked.
+FROM ghcr.io/earthbyte/geodyn-pygmt:0.1.2
+
+USER ${NB_USER}
+WORKDIR ${HOME}
