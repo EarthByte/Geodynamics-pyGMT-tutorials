@@ -8,6 +8,22 @@ the container image tags on `ghcr.io/earthbyte/geodyn-pygmt`.
 
 ### Added
 
+- **T15 — Driving the mantle with plate reconstructions.** The annulus surface
+  becomes kinematic, with velocities read from the Müller et al. (2022) 1 Ga
+  model via pyGPlates along a great circle. 8 min at 64x16. Includes the
+  scaling reality check (1 cm/yr = 916 non-dimensional, so plates out-drive
+  Ra = 1e5 convection 35 to 1) and the cell-Péclet failure it exposes.
+- **T14 — The annulus: no side walls, unequal boundaries, and a nullspace.**
+  Ends with a verification needing no reference solution: at steady state the
+  Nusselt ratio must equal r_max/r_min = 1.820, and it measures 1.810. 8 min.
+- `geodynkit/plates.py` — great-circle sampling of a plate reconstruction and
+  the non-dimensionalisation, with the in-plane-only decision documented.
+- `plotting.annulus_panel` — GMT's polar projection, the suite's last new
+  plotting idiom.
+- `tools/gadopt_annulus_case.py`, with `--plate-dir`, `--plate-age`, `--su`.
+- **Container**: pyGPlates, `libgl1` (the wheel links against libGL), and the
+  Müller 2022 reconstruction baked in at `/opt/plate-model` so the notebooks
+  need no network.
 - **T13 — The other sign: mountains, and why extension is the harder
   direction.** `--mode shortening` completes 40 steps to 16% strain and builds a
   doubly-vergent pop-up with +27 km of surface uplift; the matched extension run
@@ -47,6 +63,10 @@ the container image tags on `ghcr.io/earthbyte/geodyn-pygmt`.
 
 ### Changed
 
+- Streamline-upwind stabilisation available in the annulus energy equation.
+  Plate driving takes u_rms from ~193 to ~2000 and the cell Péclet number from
+  12 to 125; plain Galerkin then undershoots temperature to −0.44 over 2.5% of
+  the domain, and SU removes it entirely at no measurable cost.
 - **Thermal coupling done.** `EnergySolver` wired in behind `--thermal`:
   Peclet 10.5, layered radiogenic heating, temperature pinned at both ends.
   Verified stationary — with u = 0 the analytic geotherm drifts 0.31 K over

@@ -23,15 +23,28 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
  && ln -sf "$lib" "$(dirname "$lib")/libgmt.so" \
  && test -e "$(dirname "$lib")/libgmt.so"
 
-# jupyterhub is NOT optional for a BinderHub image: it provides the
-# `jupyterhub-singleuser` executable that the hub exec's to start the server.
-# Without it the image builds, pushes and runs perfectly by hand, and then
-# fails on Binder with
-#   exec: "jupyterhub-singleuser": executable file not found in $PATH
-# which says nothing about the actual omission.
 RUN pip install --no-cache-dir \
         gadopt pygmt xarray netCDF4 imageio imageio-ffmpeg \
-        jupyterhub jupyterlab notebook nbgitpuller
+        jupyterlab notebook nbgitpuller
+
+# pyGPlates, for T15. The wheel links against libGL even though nothing here
+# draws anything, so libgl1 is not optional -- without it the import fails with
+# "libGL.so.1: cannot open shared object file". Wheels exist for cp312 on both
+# manylinux x86_64 and aarch64, which is what keeps this image multi-arch.
+RUN apt-get update && apt-get install -y --no-install-recommends libgl1 \
+ && rm -rf /var/lib/apt/lists/* \
+ && pip install --no-cache-dir pygplates plate-model-manager
+
+# The Muller et al. (2022) 1 Ga reconstruction, baked in at build time so the
+# notebooks need no network. About 57 MB against a 7.5 GB image, and the
+# alternative -- fetching at runtime -- would break both offline use and CI.
+ENV GEODYN_PLATE_DIR=/opt/plate-model
+RUN python3 -c "\
+from plate_model_manager import PlateModelManager; \
+m = PlateModelManager().get_model('muller2022', data_dir='/opt/plate-model'); \
+m.get_rotation_model(); m.get_topologies()" \
+ && chmod -R a+rX /opt/plate-model \
+ && du -sh /opt/plate-model
 
 # BinderHub requires a UID-1000 user that owns $HOME, and forbids running as root.
 ARG NB_USER=jovyan
@@ -39,8 +52,7 @@ ARG NB_UID=1000
 # Ubuntu 24.04 base images already ship a UID-1000 'ubuntu' user; remove it first.
 RUN if id -u ${NB_UID} >/dev/null 2>&1; then userdel -r "$(id -un ${NB_UID})" || true; fi \
  && useradd -m -s /bin/bash -u ${NB_UID} ${NB_USER}
-ENV NB_USER=${NB_USER} \
-    HOME=/home/${NB_USER} \
+ENV HOME=/home/${NB_USER} \
     PYGMT_USE_EXTERNAL_DISPLAY=false
 WORKDIR ${HOME}
 USER ${NB_USER}

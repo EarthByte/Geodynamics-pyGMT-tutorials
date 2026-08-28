@@ -110,6 +110,48 @@ default pseudo-timestep is a fixed 0.02 while `interface_thickness` returns
 ~0.35 h_min, so the default is stable coarse and divergent fine. 12 sweeps per
 step, not 2.
 
+## Part 4 specifics
+
+**The annulus needs its rotational nullspace declared.** A closed annulus with
+free-slip boundaries can spin as a rigid body at no cost, so the Stokes operator
+is singular in that direction. `create_stokes_nullspace(Z, closed=True,
+rotational=True)`. Prescribe the surface velocity (T15) and the freedom
+disappears — declare it then and you project out part of a physical solution.
+
+**Nusselt numbers do not match in an annulus, and should not.** The boundaries
+have different areas, so at steady state `Nu_base / Nu_top = rmax / rmin =
+1.820`. Measured 1.810. This is a verification that needs no reference solution,
+and it fails loudly on an unconverged run.
+
+**`CircleManifoldMesh(n)` is an n-gon**, so the circle of radius `rmin` lies
+slightly *outside* the mesh and sample points placed on it are silently dropped.
+Inset by twice the sagitta, `r(1 - cos(pi/n))`.
+
+**pyGPlates needs `libgl1`** even though nothing draws; without it the import
+fails on `libGL.so.1`. Wheels exist for cp312 on manylinux x86_64 *and* aarch64,
+which is what keeps the image multi-arch. The Müller 2022 reconstruction (57 MB)
+is baked into the image at `/opt/plate-model` via `plate-model-manager`, so
+notebooks need no network — `ensure_reconstruction` only checks paths, it does
+not download.
+
+**G-ADOPT's `GplatesVelocityFunction` is 3-D only.** It seeds a Fibonacci sphere
+and works in lat/lon; an annulus has one angular coordinate. `geodynkit.plates`
+samples a great circle instead and keeps only the in-plane velocity component.
+
+**Plate driving makes the energy equation advection-dominated.** 1 cm/yr is 916
+non-dimensional, so plates reach ~6800 against free-slip convection's 193 — cell
+Péclet goes from 12 to 125 and plain Galerkin undershoots temperature to −0.44.
+Pass `su_advection=True`.
+
+## Editing the big drivers
+
+`gadopt_rift_case.py` has been broken **four times** by blind string-replacement
+edits inserting a keyword argument twice. Any scripted edit to it should assert
+an expected occurrence count before substituting and `ast.parse` the result
+before writing. And **smoke-test two steps before launching a detached sweep** —
+one batch of three runs died instantly on a `SyntaxError` and the failure was
+silent for twenty minutes.
+
 ## Container and publishing
 
 `ghcr.io/earthbyte/geodyn-pygmt` — multi-arch (amd64 + arm64), public. See

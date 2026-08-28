@@ -251,3 +251,93 @@ def field_panel(field, x, z, kind="temperature", title="", label=None,
         fig.text(x=0.04 * x.max(), y=0.06 * z.max(), text=stamp, justify="LT",
                  font="12p,Helvetica-Bold,white", no_clip=True)
     return fig
+
+
+# --------------------------------------------------------------------------
+# Annulus (polar) geometry
+# --------------------------------------------------------------------------
+def annulus_panel(field, theta_deg, radius, kind="temperature", title="",
+                  label=None, unit="", series=None, width_cm=13.0,
+                  cmap=None, reverse=None, contours=None, stamp=None,
+                  u_r=None, u_theta=None, every=12, arrow_cm=0.5):
+    """One panel of a 2-D cylindrical annulus, in GMT's polar projection.
+
+    Every panel in this suite so far has been a Cartesian box. An annulus needs
+    GMT's **polar** projection, ``-JP``, which takes the data as ``(theta, r)``
+    rather than ``(x, y)`` — so the grid handed in has *angle* along its columns
+    and *radius* along its rows, and no coordinate conversion happens here.
+
+    Two things about ``-JP`` are worth knowing before you fight it:
+
+    * the region is ``theta_min/theta_max/r_min/r_max``, **angles first**, which
+      is the opposite order to every Cartesian region you have written;
+    * the projection width is the diameter of the full circle, not the width of
+      the annulus, so a 13 cm panel of an annulus with rmax/rmin = 1.8 draws a
+      ring about 3 cm across. Size for the outer radius.
+
+    Vector components, if given, must already be resolved into radial and
+    tangential parts — plotting Cartesian ``(vx, vy)`` on a polar projection
+    puts every arrow in the wrong direction except at theta = 0.
+    """
+    import pygmt
+
+    field = np.asarray(field, dtype=float)
+    theta_deg = np.asarray(theta_deg, dtype=float)
+    radius = np.asarray(radius, dtype=float)
+
+    default_cmap, default_rev = SCM.get(kind, ("SCM/batlow", False))
+    cmap = cmap or default_cmap
+    reverse = default_rev if reverse is None else reverse
+    label = label if label is not None else kind.replace("_", " ")
+
+    grid = to_grid(field, theta_deg, radius, name=label)
+    region = [theta_deg.min(), theta_deg.max(), radius.min(), radius.max()]
+    projection = f"P{width_cm}c"
+
+    if series is None:
+        lo, hi = float(np.nanmin(field)), float(np.nanmax(field))
+        if hi <= lo:
+            hi = lo + 1.0
+        series = [lo, hi, (hi - lo) / 50.0]
+
+    fig = pygmt.Figure()
+    pygmt.makecpt(cmap=cmap, series=series, reverse=reverse, background=True)
+    fig.grdimage(grid=grid, region=region, projection=projection,
+                 cmap=True, nan_transparent=True)
+    if contours is not None:
+        fig.grdcontour(grid=grid, region=region, projection=projection,
+                       levels=contours, pen="0.3p,gray30")
+
+    if u_r is not None and u_theta is not None:
+        s = every
+        th = np.radians(theta_deg[::s])
+        rr = radius[::s]
+        TH, RR = np.meshgrid(th, rr)
+        ur = np.asarray(u_r)[::s, ::s]
+        ut = np.asarray(u_theta)[::s, ::s]
+        # Back to Cartesian for the arrow direction, then to GMT's
+        # azimuth-from-north convention.
+        vx = ur * np.cos(TH) - ut * np.sin(TH)
+        vy = ur * np.sin(TH) + ut * np.cos(TH)
+        mag = np.hypot(vx, vy)
+        vmax = float(np.nanmax(mag)) or 1.0
+        fig.plot(
+            x=np.degrees(TH).ravel(), y=RR.ravel(),
+            style=f"v0.15c+e+a40+gblack+z{arrow_cm:g}c",
+            direction=[(vx / vmax).ravel(), (vy / vmax).ravel()],
+            pen="0.4p,black", region=region, projection=projection,
+        )
+
+    fig.basemap(region=region, projection=projection, frame=["xa45f15", "ya0.25"])
+    if title:
+        fig.text(position="TC", text=title, font="12p,Helvetica-Bold",
+                 offset="0/0.7c", no_clip=True)
+    if stamp:
+        fig.text(position="BL", text=stamp, font="9p,Helvetica",
+                 offset="0.3c/0.3c", no_clip=True)
+    # No quotes around the label: GMT takes the rest of the modifier verbatim,
+    # so quoting it puts literal quote marks on the colour bar.
+    frame = [f"xaf+l{label}"] + ([f"y+l{unit}"] if unit else [])
+    fig.colorbar(frame=frame,
+                 position=f"JBC+w{0.55 * width_cm}c/0.35c+h+o0/1.2c")
+    return fig

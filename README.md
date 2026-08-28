@@ -166,16 +166,32 @@ archived UWGeodynamics rifting tutorials for **model design**; not for code.
 Following the GemPy tutorials' "units of three" grammar, each rung adds exactly
 one structural complication rather than several at once.
 
-### Part 4 — mantle scale, planned
+### Part 4 — mantle scale
 
-* **T14** — the 2-D cylindrical annulus (see the note below)
-* **T15** — driving the annulus with pyGPlates surface velocities
+| # | Notebook | Runtime |
+|---|---|---|
+| 14 | The annulus: no side walls, unequal boundaries, and a nullspace | **8 min (measured)** |
+| 15 | Driving the mantle with plate reconstructions | **8 min (measured)** |
 
-> **Note on the planned T14.** The annulus at G-ADOPT's default settings
-> (128×32, Ra = 1e5, steady-state tolerance 1e-7) exceeded 50 minutes serial on a
-> 2-core cloud container and projects to roughly 100 minutes. On a modern laptop
-> that is ~30 min serial, and comfortably less under MPI. The notebook relaxes the
-> tolerance and shows the MPI route.
+T14 leaves the box behind. Three things change at once: the domain is periodic so
+the side walls stop being a fiction; the two boundaries have different areas; and
+a closed annulus can rotate as a rigid body, so the Stokes operator gains a
+**rotational nullspace** that has to be declared. It ends with a verification
+that needs no reference solution — at steady state the fluxes balance but the
+Nusselt numbers cannot, and their ratio must equal r_max/r_min. Measured 1.810
+against 1.820, to half a percent.
+
+T15 replaces the free-slip surface with **velocities from the Müller et al.
+(2022) 1 Ga reconstruction**, read with pyGPlates along a great circle. The
+surface stops being a boundary condition you invent. Both are in the container,
+which carries pyGPlates and the reconstruction so the notebooks need no network.
+
+> **On the annulus tolerance.** G-ADOPT's demo settings (128×32, Ra = 1e5,
+> steady-state tolerance 1e-7) exceeded 50 minutes serial on a 2-core container
+> and project past an hour and a half. T14 runs 64×16 to a tolerance of 1e-5,
+> which reaches steady state in 1053 steps and about 7 minutes — and gets the
+> Nusselt ratio right to half a percent, so for that quantity the hundredfold
+> tighter tolerance buys nothing.
 
 ## Installation
 
