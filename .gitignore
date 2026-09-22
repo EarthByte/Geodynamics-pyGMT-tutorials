@@ -19,3 +19,7 @@ external/
 *.log
 rift_long*
 product_rift*
+
+# private working notes: kept locally, never published
+CLAUDE.md
+CHANGELOG.md
