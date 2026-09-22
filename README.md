@@ -75,7 +75,7 @@ materials, accumulated plastic strain, strain weakening, a solved geotherm and a
 deformable surface, in **both** extension and shortening, with invariants that
 stop it when the material description stops meaning anything.
 
-The honest edge of the suite is the **level-set representational ceiling at
+The edge of the suite is the **level-set representational ceiling at
 15–25% strain on a 2 km mesh**, and it is what blocks both of Part 3's unreached
 targets — rifting modes (T12) and critical taper (T13). That is a resolution
 problem, not a physics one.
